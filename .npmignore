@@ -1,0 +1,44 @@
+# Source files (only dist should be published)
+src/
+tests/
+*.test.ts
+*.spec.ts
+
+# Development files
+tsconfig.json
+.git/
+.gitignore
+
+# Documentation (keep only essential)
+# All analysis/evaluation docs removed
+
+# Build artifacts
+node_modules/
+dist/
+*.log
+*.tsbuildinfo
+*.map
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Cache
+storage/
+tests/fixtures/
+
+# Lock files (keep bun.lock for reference but npm will use its own)
+# bun.lock
+

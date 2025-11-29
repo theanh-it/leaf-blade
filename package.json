@@ -1,0 +1,59 @@
+{
+  "name": "leaf-blade",
+  "version": "0.0.1",
+  "description": "Blade template engine for Leaf framework - Laravel Blade-like syntax for JavaScript/TypeScript",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node --external ejs --external html-minifier-terser --external elysia && bun run build:types",
+    "build:types": "tsc -p tsconfig.build.json",
+    "dev": "bun run src/index.ts",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "prepublishOnly": "bun run build && bun test",
+    "prepack": "bun run build"
+  },
+  "keywords": [
+    "blade",
+    "template",
+    "engine",
+    "laravel",
+    "elysia",
+    "leaf",
+    "typescript",
+    "bun",
+    "ssr",
+    "server-side-rendering"
+  ],
+  "author": "theanh-it",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/theanh-it/leaf-blade.git"
+  },
+  "bugs": {
+    "url": "https://github.com/theanh-it/leaf-blade/issues"
+  },
+  "homepage": "https://github.com/theanh-it/leaf-blade#readme",
+  "type": "module",
+  "dependencies": {
+    "ejs": "^3.1.10",
+    "elysia": "^1.4.16",
+    "html-minifier-terser": "^7.2.0"
+  },
+  "devDependencies": {
+    "@types/ejs": "^3.1.5",
+    "@types/html-minifier-terser": "^7.0.2",
+    "@types/node": "^24.0.1",
+    "bun-types": "latest",
+    "typescript": "^5.8.3"
+  },
+  "peerDependencies": {
+    "elysia": "^1.4.16"
+  }
+}
