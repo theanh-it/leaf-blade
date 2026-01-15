@@ -236,13 +236,16 @@ export class BladeCompiler {
       const cleanExpr = expression.replace(/\$/g, "").trim();
       
       // Pattern: items as item hoặc items as key => item
-      const asMatch = cleanExpr.match(/^\s*(\w+)\s+as\s+(?:(\w+)\s*=>\s*)?(\w+)\s*$/);
+      // Hỗ trợ dot notation: test.css as cssFile
+      const asMatch = cleanExpr.match(/^\s*(\w+(?:\.\w+)*)\s+as\s+(?:(\w+)\s*=>\s*)?(\w+)\s*$/);
       if (asMatch) {
         const [, items, key, item] = asMatch;
+        // Parse dot notation thành JavaScript property access
+        const jsItems = this.parseExpression(items);
         if (key) {
-          return `<% for (const [${key}, ${item}] of Object.entries(${items} || [])) { %>`;
+          return `<% for (const [${key}, ${item}] of Object.entries(${jsItems} || [])) { %>`;
         } else {
-          return `<% for (const ${item} of (${items} || [])) { %>`;
+          return `<% for (const ${item} of (${jsItems} || [])) { %>`;
         }
       }
       return match; // Fallback

@@ -98,6 +98,43 @@ afterEach(() => {
     expect(result).toContain("C");
   });
 
+  test("render @foreach with dot notation for CSS links", async () => {
+    const templateName = "css-assets";
+    const cssTemplatePath = join(testViewsDir, `${templateName}.blade.html`);
+    const bladeTemplate = `@foreach(test.css as cssFile)
+  <link rel="stylesheet" crossorigin href="{{ cssFile }}" />
+@endforeach`;
+
+    writeFileSync(cssTemplatePath, bladeTemplate, "utf-8");
+
+    const renderer = new BladeRenderer({
+      viewsDir: testViewsDir,
+      cache: false,
+    });
+
+    const cssFiles = [
+      "/assets/main.css",
+      "/assets/vendor.css",
+      "/assets/components.css",
+    ];
+    const templateData = {
+      test: {
+        css: cssFiles,
+      },
+    };
+
+    const renderedHtml = await renderer.render(templateName, templateData);
+
+    // Verify all CSS files are rendered as link tags
+    cssFiles.forEach((cssFile) => {
+      expect(renderedHtml).toContain(`href="${cssFile}"`);
+    });
+
+    // Verify HTML attributes are present
+    expect(renderedHtml).toContain('rel="stylesheet"');
+    expect(renderedHtml).toContain("crossorigin");
+  });
+
   test("render template with layout extends", async () => {
     // Create layout
     const layoutDir = join(testViewsDir, "layouts");
@@ -208,4 +245,3 @@ afterEach(() => {
     expect(result2).toBeDefined();
   });
 }
-
