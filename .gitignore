@@ -4,7 +4,7 @@ node_modules/
 # Build output
 dist/
 
-# Cache (auto-created at runtime)
+# Legacy cache directory (`cacheDir` is deprecated and no longer created)
 storage/
 
 # Test fixtures (auto-created during tests)
@@ -24,4 +24,3 @@ tests/fixtures/
 # OS
 .DS_Store
 Thumbs.db
-

@@ -2,9 +2,9 @@
 
 Blade template engine for Leaf framework - Laravel Blade-like syntax for JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-0.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-0.0.3-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
 
 > 📖 [Tiếng Việt](README.vi.md) | English
@@ -29,7 +29,6 @@ const app = new Elysia()
     bladePlugin({
       viewsDir: path.join(process.cwd(), "views/blade"),
       cache: true,
-      cacheDir: path.join(process.cwd(), "storage/blade"),
       minify: process.env.NODE_ENV === "production",
     })
   )
@@ -93,8 +92,8 @@ const html = await renderer.render("template", {
 interface BladeOptions {
   viewsDir?: string; // Directory containing templates (default: "views/blade")
   cache?: boolean; // Enable/disable cache (default: true)
-  cacheDir?: string; // Cache directory (default: "storage/blade")
-  minify?: boolean; // Enable/disable HTML minification (default: false)
+  cacheDir?: string; // Deprecated compatibility option; no disk cache is created
+  minify?: boolean; // Defaults to true only when NODE_ENV="production"
 }
 ```
 
@@ -112,8 +111,7 @@ interface BladeOptions {
 
 ### Performance
 
-- ✅ **In-memory caching**: Compiled templates cached in memory
-- ✅ **File-based caching**: Compiled templates saved to disk
+- ✅ **Safe in-memory caching**: Template source and compiled output only
 - ✅ **HTML minification**: Automatically minify HTML in production
 - ✅ **Async I/O**: Uses async file operations
 
@@ -210,9 +208,8 @@ interface BladeOptions {
 ### 6. Comments
 
 ```blade
-{{-- This is a comment, removed in production --}}
-{{-- Comments can span multiple lines
-     and will be removed when rendered --}}
+{{-- This is a comment and is never rendered --}}
+{{-- Comments can span multiple lines and may safely contain Blade syntax --}}
 ```
 
 ### 7. JavaScript Blocks (`@js` ... `@endjs`)
@@ -444,10 +441,34 @@ bladePlugin({
 ```typescript
 // Clear cache programmatically
 const renderer = new BladeRenderer({ ... });
-await renderer.clearCache();
+renderer.clearCache();
 ```
 
 ## 📋 Changelog
+
+### [0.0.3] - 2026-07-17
+
+#### Security
+
+- Corrected output semantics: `{{ value }}` is HTML-escaped and `{!! value !!}` is raw.
+- Removed Blade comments before compiling directives or expressions.
+- Composed includes as source and rendered the final template exactly once, preventing included output from being evaluated as EJS again.
+- Removed rendered-include and minified-response caches that could leak data across requests.
+- Rejected template traversal and symlinks that resolve outside `viewsDir`.
+- Replaced `Bun.file` with `node:fs/promises` for Node-compatible template loading.
+- Replaced the collision-prone compiled-template hash with SHA-256.
+
+#### Upgrade note
+
+The escaping behavior now matches the documented Blade syntax. Applications that worked around the old reversed behavior must change trusted raw HTML from `{{ html }}` to `{!! html !!}` and untrusted values from `{!! value !!}` to `{{ value }}`. The `cacheDir` option remains accepted for compatibility but is deprecated and has no effect.
+
+Template lookup is now confined to `viewsDir`. If an application used `../` paths or symlinks to shared templates outside that directory, move those templates under a common root and configure that root as `viewsDir`. Do not rely on raw values or included output being evaluated as EJS a second time; they are now treated as output. Blade comments are always removed and no longer leave a development placeholder.
+
+### [0.0.2] - 2026-01-15
+
+#### Fixed
+
+- Added dot-notation collection support to `@foreach`, such as `@foreach(assets.css as cssFile)`.
 
 ### [0.0.1] - 2025-11-29
 
@@ -494,6 +515,8 @@ await renderer.clearCache();
 ```bash
 bun test
 ```
+
+The current suite contains 54 tests, including security regressions for escaping, include composition, cache isolation, and path traversal.
 
 ## 📝 License
 

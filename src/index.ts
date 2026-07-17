@@ -11,9 +11,9 @@ export {
   type BladeViewData,
   type BladeContext,
   type BladeContextExtensions,
-} from "./plugins/blade";
+} from "./plugins/blade.js";
 
 // Export engines
-export { BladeCompiler } from "./engines/compiler";
-export { BladeRenderer } from "./engines/renderer";
-export { SimpleRenderer } from "./engines/simple-renderer";
+export { BladeCompiler } from "./engines/compiler.js";
+export { BladeRenderer } from "./engines/renderer.js";
+export { SimpleRenderer } from "./engines/simple-renderer.js";

@@ -2,9 +2,9 @@
 
 Blade template engine cho Leaf framework - Laravel Blade-like syntax cho JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-0.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-0.0.3-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
 
 > 📖 Tiếng Việt | [English](README.md)
@@ -29,7 +29,6 @@ const app = new Elysia()
     bladePlugin({
       viewsDir: path.join(process.cwd(), "views/blade"),
       cache: true,
-      cacheDir: path.join(process.cwd(), "storage/blade"),
       minify: process.env.NODE_ENV === "production",
     })
   )
@@ -93,8 +92,8 @@ const html = await renderer.render("template", {
 interface BladeOptions {
   viewsDir?: string; // Thư mục chứa templates (mặc định: "views/blade")
   cache?: boolean; // Bật/tắt cache (mặc định: true)
-  cacheDir?: string; // Thư mục lưu cache (mặc định: "storage/blade")
-  minify?: boolean; // Bật/tắt minify HTML (mặc định: false)
+  cacheDir?: string; // Tùy chọn tương thích đã deprecated; không tạo disk cache
+  minify?: boolean; // Mặc định chỉ bật khi NODE_ENV="production"
 }
 ```
 
@@ -112,8 +111,7 @@ interface BladeOptions {
 
 ### Performance
 
-- ✅ **In-memory caching**: Compiled templates được cache trong memory
-- ✅ **File-based caching**: Compiled templates được lưu vào disk
+- ✅ **In-memory cache an toàn**: Chỉ cache source và kết quả compile
 - ✅ **HTML minification**: Tự động minify HTML trong production
 - ✅ **Async I/O**: Sử dụng async file operations
 
@@ -210,9 +208,8 @@ interface BladeOptions {
 ### 6. Comments
 
 ```blade
-{{-- This is a comment, removed in production --}}
-{{-- Comments có thể nhiều dòng
-     và sẽ bị xóa khi render --}}
+{{-- Comment này không bao giờ được render --}}
+{{-- Comment có thể nhiều dòng và chứa Blade syntax an toàn --}}
 ```
 
 ### 7. JavaScript Blocks (`@js` ... `@endjs`)
@@ -444,10 +441,34 @@ bladePlugin({
 ```typescript
 // Clear cache programmatically
 const renderer = new BladeRenderer({ ... });
-await renderer.clearCache();
+renderer.clearCache();
 ```
 
 ## 📋 Changelog
+
+### [0.0.3] - 2026-07-17
+
+#### Bảo mật
+
+- Sửa đúng output semantics: `{{ value }}` được HTML escape và `{!! value !!}` là raw.
+- Loại Blade comments trước khi compile directive hoặc expression.
+- Compose include ở dạng source và chỉ render template cuối đúng một lần, ngăn output của partial bị thực thi lại như EJS.
+- Loại cache HTML include và response minified có thể làm rò dữ liệu giữa request.
+- Chặn template traversal và symlink trỏ ra ngoài `viewsDir`.
+- Thay `Bun.file` bằng `node:fs/promises` để việc đọc template tương thích Node.
+- Thay hash cache dễ collision bằng SHA-256.
+
+#### Lưu ý nâng cấp
+
+Hành vi escape giờ khớp với Blade syntax đã document. Ứng dụng từng workaround hành vi bị đảo ở bản cũ cần đổi trusted raw HTML từ `{{ html }}` sang `{!! html !!}`, và dữ liệu không tin cậy từ `{!! value !!}` sang `{{ value }}`. `cacheDir` vẫn được chấp nhận để tương thích nhưng đã deprecated và không còn tác dụng.
+
+Việc tìm template giờ bị giới hạn trong `viewsDir`. Nếu ứng dụng từng dùng đường dẫn `../` hoặc symlink tới template dùng chung nằm ngoài thư mục này, hãy chuyển các template đó vào một thư mục gốc chung và cấu hình thư mục ấy làm `viewsDir`. Không dựa vào raw value hoặc output của include để thực thi lại như EJS lần hai; giờ chúng chỉ được coi là output. Blade comment luôn bị loại bỏ và không còn để lại placeholder ở môi trường development.
+
+### [0.0.2] - 2026-01-15
+
+#### Đã sửa
+
+- Hỗ trợ collection dạng dot notation trong `@foreach`, ví dụ `@foreach(assets.css as cssFile)`.
 
 ### [0.0.1] - 2025-11-29
 
@@ -494,6 +515,8 @@ await renderer.clearCache();
 ```bash
 bun test
 ```
+
+Test suite hiện có 54 tests, bao gồm regression tests cho escaping, include composition, cache isolation và path traversal.
 
 ## 📝 License
 

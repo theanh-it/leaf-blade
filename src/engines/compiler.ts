@@ -4,21 +4,18 @@
  * Tương tự Laravel Blade nhưng phù hợp với JavaScript/TypeScript
  */
 
-import fs from "fs";
-import path from "path";
+import { createHash } from "node:crypto";
 
 export interface BladeCompileOptions {
   viewsDir: string;
+  /** @deprecated Reserved for backward compatibility. Blade only uses in-memory caches. */
   cacheDir?: string;
   cache?: boolean;
 }
 
 export class BladeCompiler {
-  private viewsDir: string;
-  private cacheDir: string;
   private cache: boolean;
   private compiledCache = new Map<string, string>();
-  private contentHashCache = new Map<string, string>();
 
   constructor(options: BladeCompileOptions) {
     // Validate viewsDir
@@ -26,41 +23,20 @@ export class BladeCompiler {
       throw new Error("BladeCompiler: viewsDir is required and must be a string");
     }
 
-    this.viewsDir = options.viewsDir;
-    this.cacheDir = options.cacheDir || path.join(process.cwd(), "storage/blade");
     this.cache = options.cache ?? true;
 
-    // Validate cacheDir
-    if (typeof this.cacheDir !== "string") {
+    // cacheDir is kept as a no-op option so existing applications can upgrade
+    // without a type or runtime break. This compiler has no disk cache.
+    if (options.cacheDir !== undefined && typeof options.cacheDir !== "string") {
       throw new Error("BladeCompiler: cacheDir must be a string");
-    }
-
-    // Tạo cache directory nếu chưa có
-    try {
-      if (!fs.existsSync(this.cacheDir)) {
-        fs.mkdirSync(this.cacheDir, { recursive: true });
-      }
-    } catch (error: any) {
-      throw new Error(
-        `BladeCompiler: Failed to create cache directory: ${this.cacheDir}\n` +
-        `Error: ${error.message}\n` +
-        `Make sure you have write permissions to the parent directory.`
-      );
     }
   }
 
   /**
-   * Generate hash for template content (simple hash for cache key)
+   * Generate a collision-resistant hash for the compiled-template cache key.
    */
   private hashContent(content: string): string {
-    // Simple hash - có thể dùng crypto nếu cần
-    let hash = 0;
-    for (let i = 0; i < content.length; i++) {
-      const char = content.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return hash.toString(36);
+    return createHash("sha256").update(content).digest("base64url");
   }
 
   /**
@@ -77,16 +53,18 @@ export class BladeCompiler {
       return this.compiledCache.get(cacheKey)!;
     }
 
-    let compiled = templateContent;
+    // Blade comments must be removed before any directive/expression pass.
+    // Otherwise comment contents can be turned into executable EJS.
+    let compiled = this.compileComments(templateContent);
 
     // 1. @extends directive
-    compiled = this.compileExtends(compiled, templatePath);
+    compiled = this.compileExtends(compiled);
 
     // 2. @section/@yield directives
     compiled = this.compileSections(compiled);
 
     // 3. @include directive
-    compiled = this.compileInclude(compiled, templatePath);
+    compiled = this.compileInclude(compiled);
 
     // 4. @if/@elseif/@else/@endif
     compiled = this.compileConditionals(compiled);
@@ -103,10 +81,7 @@ export class BladeCompiler {
     // 8. Variables: {{ }} và {!! !!}
     compiled = this.compileVariables(compiled);
 
-    // 9. Comments: {{-- --}}
-    compiled = this.compileComments(compiled);
-
-    // 10. @js/@endjs (execute JavaScript code)
+    // 9. @js/@endjs (execute JavaScript code)
     compiled = this.compileJs(compiled);
 
     // Cache compiled result
@@ -129,16 +104,15 @@ export class BladeCompiler {
    */
   clearCache(): void {
     this.compiledCache.clear();
-    this.contentHashCache.clear();
   }
 
   /**
    * Compile @extends directive
    * @extends('layout') → layout inheritance
    */
-  private compileExtends(content: string, templatePath: string): string {
+  private compileExtends(content: string): string {
     const extendsRegex = /@extends\(['"]([^'"]+)['"]\)/g;
-    return content.replace(extendsRegex, (match, layoutName) => {
+    return content.replace(extendsRegex, (_match, layoutName) => {
       // Mark extends - sẽ xử lý trong render function
       return `<!-- BLADE_EXTENDS:${layoutName} -->`;
     });
@@ -154,7 +128,7 @@ export class BladeCompiler {
     // Compile @section with short syntax: @section('name', 'value')
     content = content.replace(
       /@section\(['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]\)/g,
-      (match, name, value) => {
+      (_match, name, value) => {
         return `<!-- BLADE_SECTION_START:${name} -->${value}<!-- BLADE_SECTION_END:${name} -->`;
       }
     );
@@ -162,14 +136,14 @@ export class BladeCompiler {
     // Compile @section with long syntax: @section('name') ... @endsection
     content = content.replace(
       /@section\(['"]([^'"]+)['"]\)([\s\S]*?)@endsection/g,
-      (match, name, body) => {
+      (_match, name, body) => {
         return `<!-- BLADE_SECTION_START:${name} -->${body}<!-- BLADE_SECTION_END:${name} -->`;
       }
     );
 
     // Compile @yield
     // Hỗ trợ: @yield('name') và @yield('name', 'default')
-    content = content.replace(/@yield\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]*)['"])?\s*\)/g, (match, name, defaultValue) => {
+    content = content.replace(/@yield\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]*)['"])?\s*\)/g, (_match, name, defaultValue) => {
       const defaultVal = defaultValue ? `<!-- BLADE_DEFAULT:${defaultValue} -->` : "";
       return `<!-- BLADE_YIELD:${name} -->${defaultVal}`;
     });
@@ -181,14 +155,14 @@ export class BladeCompiler {
    * Compile @include directive
    * @include('partial') → include partial
    */
-  private compileInclude(content: string, templatePath: string): string {
+  private compileInclude(content: string): string {
     // @include('partial')
-    content = content.replace(/@include\(['"]([^'"]+)['"]\)/g, (match, partial) => {
+    content = content.replace(/@include\(['"]([^'"]+)['"]\)/g, (_match, partial) => {
       return `<!-- BLADE_INCLUDE:${partial} -->`;
     });
 
     // @include('partial', { data })
-    content = content.replace(/@include\(['"]([^'"]+)['"],\s*({[^}]+})\)/g, (match, partial, data) => {
+    content = content.replace(/@include\(['"]([^'"]+)['"],\s*({[^}]+})\)/g, (_match, partial, data) => {
       return `<!-- BLADE_INCLUDE_WITH:${partial}:${data} -->`;
     });
 
@@ -201,12 +175,12 @@ export class BladeCompiler {
    */
   private compileConditionals(content: string): string {
     // @if
-    content = content.replace(/@if\s*\(([^)]+)\)/g, (match, condition) => {
+    content = content.replace(/@if\s*\(([^)]+)\)/g, (_match, condition) => {
       return `<% if (${this.parseExpression(condition)}) { %>`;
     });
 
     // @elseif
-    content = content.replace(/@elseif\s*\(([^)]+)\)/g, (match, condition) => {
+    content = content.replace(/@elseif\s*\(([^)]+)\)/g, (_match, condition) => {
       return `<% } else if (${this.parseExpression(condition)}) { %>`;
     });
 
@@ -264,7 +238,7 @@ export class BladeCompiler {
    * @for($i = 0; $i < 10; $i++) ... @endfor
    */
   private compileFor(content: string): string {
-    content = content.replace(/@for\s*\(([^)]+)\)/g, (match, expression) => {
+    content = content.replace(/@for\s*\(([^)]+)\)/g, (_match, expression) => {
       // Parse PHP-style for loop: $i = 0; $i < 10; $i++
       const jsExpression = expression
         .replace(/\$(\w+)/g, "$1") // Remove $ from variables
@@ -283,7 +257,7 @@ export class BladeCompiler {
    * Compile @while directive
    */
   private compileWhile(content: string): string {
-    content = content.replace(/@while\s*\(([^)]+)\)/g, (match, condition) => {
+    content = content.replace(/@while\s*\(([^)]+)\)/g, (_match, condition) => {
       return `<% while (${this.parseExpression(condition)}) { %>`;
     });
 
@@ -302,15 +276,15 @@ export class BladeCompiler {
    */
   private compileVariables(content: string): string {
     // {{ expression }} - escaped (support complex expressions)
-    content = content.replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, expression) => {
+    content = content.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_match, expression) => {
       const jsExpr = this.parseExpression(expression);
-      return `<%- ${jsExpr} %>`;
+      return `<%= ${jsExpr} %>`;
     });
 
     // {!! expression !!} - raw
-    content = content.replace(/\{!!\s*([^!]+)\s*!!\}/g, (match, expression) => {
+    content = content.replace(/\{!!\s*([^!]+)\s*!!\}/g, (_match, expression) => {
       const jsExpr = this.parseExpression(expression);
-      return `<%= ${jsExpr} %>`;
+      return `<%- ${jsExpr} %>`;
     });
 
     return content;
@@ -321,10 +295,7 @@ export class BladeCompiler {
    * {{-- comment --}} → HTML comment hoặc remove
    */
   private compileComments(content: string): string {
-    return content.replace(/\{\{--([\s\S]*?)--\}\}/g, () => {
-      // Remove comments in production, keep in development
-      return process.env.NODE_ENV === "production" ? "" : "<!-- BLADE_COMMENT -->";
-    });
+    return content.replace(/\{\{--([\s\S]*?)--\}\}/g, "");
   }
 
   /**
@@ -332,7 +303,7 @@ export class BladeCompiler {
    * Lưu ý: Không cho phép return statement trong @js
    */
   private compileJs(content: string): string {
-    content = content.replace(/@js\s*([\s\S]*?)@endjs/g, (match, code) => {
+    content = content.replace(/@js\s*([\s\S]*?)@endjs/g, (_match, code) => {
       // Remove return statements nếu có (không hợp lệ trong EJS template)
       const cleanCode = code.replace(/^\s*return\s+/gm, "").trim();
       // Execute as JavaScript
@@ -374,4 +345,3 @@ export class BladeCompiler {
     return parsed;
   }
 }
-

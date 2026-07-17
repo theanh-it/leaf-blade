@@ -4,14 +4,15 @@
  */
 
 import type { Elysia, Context } from "elysia";
-import path from "path";
-import { BladeRenderer } from "../engines/renderer";
+import path from "node:path";
+import { BladeRenderer } from "../engines/renderer.js";
 import { minify } from "html-minifier-terser";
 
 // Types
 export interface BladeOptions {
   viewsDir?: string;
   cache?: boolean;
+  /** @deprecated Reserved for backward compatibility. Blade only uses in-memory caches. */
   cacheDir?: string;
   minify?: boolean;
 }
@@ -62,10 +63,6 @@ export const bladePlugin = (options: BladeOptions = {}) => {
     cacheDir: options.cacheDir,
   });
 
-  // Cache for minified output (cache based on rendered HTML hash, not data)
-  // Note: Minification is deterministic, so we can cache based on HTML content
-  const minifiedCache = new Map<string, string>();
-
   return (app: Elysia) => {
     return app.derive(() => {
       /**
@@ -79,23 +76,6 @@ export const bladePlugin = (options: BladeOptions = {}) => {
 
         // Minify HTML nếu được bật
         if (shouldMinify) {
-          // Generate cache key based on HTML content hash
-          // Simple hash for cache key (for production, consider crypto hash)
-          let hash = 0;
-          const htmlPreview = html.substring(0, 1000); // Use first 1000 chars for hash
-          for (let i = 0; i < htmlPreview.length; i++) {
-            const char = htmlPreview.charCodeAt(i);
-            hash = ((hash << 5) - hash) + char;
-            hash = hash & hash;
-          }
-          const cacheKey = `${template}:${hash.toString(36)}:${html.length}`;
-
-          // Check minified cache
-          if (cache && minifiedCache.has(cacheKey)) {
-            return minifiedCache.get(cacheKey)!;
-          }
-
-          // Minify
           html = await minify(html, {
             collapseWhitespace: true,
             removeComments: true,
@@ -106,18 +86,6 @@ export const bladePlugin = (options: BladeOptions = {}) => {
             minifyCSS: true,
             minifyJS: true,
           });
-
-          // Cache minified output
-          if (cache) {
-            minifiedCache.set(cacheKey, html);
-            // Limit cache size
-            if (minifiedCache.size > 500) {
-              const firstKey = minifiedCache.keys().next().value;
-              if (firstKey) {
-                minifiedCache.delete(firstKey);
-              }
-            }
-          }
         }
 
         return html;
@@ -180,4 +148,3 @@ export async function bladeView(
     },
   });
 }
-

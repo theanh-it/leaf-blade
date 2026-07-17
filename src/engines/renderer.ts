@@ -1,16 +1,35 @@
 /**
  * Blade Renderer
- * Render compiled Blade templates với layout system
+ * Composes Blade templates into EJS source and renders exactly once.
  */
 
-import path from "path";
+import { constants, type Stats } from "node:fs";
+import { open, realpath, stat } from "node:fs/promises";
+import path from "node:path";
 import ejs from "ejs";
-import { BladeCompiler } from "./compiler";
+import { BladeCompiler } from "./compiler.js";
 
 export interface BladeRenderOptions {
   viewsDir: string;
   cache?: boolean;
+  /** @deprecated Reserved for backward compatibility. Blade only uses in-memory caches. */
   cacheDir?: string;
+}
+
+class BladePathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BladePathError";
+  }
+}
+
+interface TemplateFileStats {
+  realPath: string;
+  mtime: number;
+  ctime: number;
+  size: number;
+  dev: number;
+  ino: number;
 }
 
 export class BladeRenderer {
@@ -18,66 +37,205 @@ export class BladeRenderer {
   private viewsDir: string;
   private cache: boolean;
   private templateCache = new Map<string, string>();
-  private compiledIncludesCache = new Map<string, string>();
-  private fileStatsCache = new Map<string, { mtime: number; size: number }>();
+  private fileStatsCache = new Map<string, TemplateFileStats>();
+  private realViewsDir?: string;
 
   constructor(options: BladeRenderOptions) {
-    // Validate viewsDir
     if (!options.viewsDir || typeof options.viewsDir !== "string") {
       throw new Error("BladeRenderer: viewsDir is required and must be a string");
     }
 
-    // Check if viewsDir exists (async check will be done on first template load)
-    this.viewsDir = options.viewsDir;
+    this.viewsDir = path.resolve(options.viewsDir);
     this.cache = options.cache ?? true;
 
     this.compiler = new BladeCompiler({
-      viewsDir: options.viewsDir,
+      viewsDir: this.viewsDir,
       cacheDir: options.cacheDir,
       cache: options.cache,
     });
   }
 
   /**
-   * Load template file asynchronously
+   * Return true only when target is a child of base. Prefix checks are unsafe
+   * here because directories such as `/views-private` also start with `/views`.
    */
-  private async loadTemplate(templatePath: string): Promise<string> {
-    // Check in-memory cache first
-    if (this.cache && this.templateCache.has(templatePath)) {
-      // Verify file hasn't changed (check mtime)
+  private isWithinDirectory(base: string, target: string): boolean {
+    const relative = path.relative(base, target);
+    return (
+      relative !== "" &&
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative)
+    );
+  }
+
+  private assertWithinViews(target: string, templateName: string): void {
+    if (!this.isWithinDirectory(this.viewsDir, target)) {
+      throw new BladePathError(
+        `BladeRenderer: Template path must stay inside viewsDir: ${templateName}`
+      );
+    }
+  }
+
+  /**
+   * Resolve symlinks before reading so a link inside viewsDir cannot point to
+   * a template outside the configured root.
+   */
+  private async resolveRealTemplatePath(templatePath: string): Promise<string> {
+    const realRoot = this.realViewsDir ?? (await realpath(this.viewsDir));
+    this.realViewsDir = realRoot;
+
+    const realTemplate = await realpath(templatePath);
+    if (!this.isWithinDirectory(realRoot, realTemplate)) {
+      throw new BladePathError(
+        `BladeRenderer: Resolved template path must stay inside viewsDir: ${templatePath}`
+      );
+    }
+
+    return realTemplate;
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private errorCode(error: unknown): string | undefined {
+    if (typeof error === "object" && error !== null && "code" in error) {
+      const code = (error as { code?: unknown }).code;
+      return typeof code === "string" ? code : undefined;
+    }
+    return undefined;
+  }
+
+  private sameFileVersion(left: Stats, right: Stats): boolean {
+    return (
+      left.dev === right.dev &&
+      left.ino === right.ino &&
+      left.mtimeMs === right.mtimeMs &&
+      left.ctimeMs === right.ctimeMs &&
+      left.size === right.size
+    );
+  }
+
+  private matchesCachedVersion(
+    cached: TemplateFileStats,
+    realPath: string,
+    current: Stats
+  ): boolean {
+    return (
+      cached.realPath === realPath &&
+      cached.dev === current.dev &&
+      cached.ino === current.ino &&
+      cached.mtime === current.mtimeMs &&
+      cached.ctime === current.ctimeMs &&
+      cached.size === current.size
+    );
+  }
+
+  private async openedTemplateMatchesPath(
+    templatePath: string,
+    expectedRealPath: string,
+    openedStats: Stats
+  ): Promise<boolean> {
+    const currentRealPath = await this.resolveRealTemplatePath(templatePath);
+    if (currentRealPath !== expectedRealPath) {
+      return false;
+    }
+
+    const currentStats = await stat(currentRealPath);
+    return currentStats.isFile() && this.sameFileVersion(openedStats, currentStats);
+  }
+
+  /**
+   * Read through one file descriptor so path replacement cannot mix content
+   * from one file with metadata from another.
+   */
+  private async readStableTemplate(
+    templatePath: string
+  ): Promise<{ content: string; realPath: string; stats: Stats }> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const realTemplatePath = await this.resolveRealTemplatePath(templatePath);
+      const safeOpenFlags =
+        process.platform === "win32"
+          ? 0
+          : constants.O_NOFOLLOW | constants.O_NONBLOCK;
+      const handle = await open(
+        realTemplatePath,
+        constants.O_RDONLY | safeOpenFlags
+      );
+
       try {
-        const stats = await Bun.file(templatePath).stat();
-        const cached = this.fileStatsCache.get(templatePath);
-        
-        if (cached && cached.mtime === stats.mtime.getTime() && cached.size === stats.size) {
-          return this.templateCache.get(templatePath)!;
+        const before = await handle.stat();
+        if (!before.isFile()) {
+          throw new Error(`Template is not a regular file: ${realTemplatePath}`);
         }
-      } catch {
-        // File might not exist, fall through to read
+
+        if (
+          !(await this.openedTemplateMatchesPath(
+            templatePath,
+            realTemplatePath,
+            before
+          ))
+        ) {
+          continue;
+        }
+
+        const content = await handle.readFile({ encoding: "utf8" });
+        const after = await handle.stat();
+
+        if (
+          this.sameFileVersion(before, after) &&
+          (await this.openedTemplateMatchesPath(
+            templatePath,
+            realTemplatePath,
+            after
+          ))
+        ) {
+          return { content, realPath: realTemplatePath, stats: after };
+        }
+      } finally {
+        await handle.close();
       }
     }
 
-    // Read file asynchronously
+    throw new Error(`Template changed while being read: ${templatePath}`);
+  }
+
+  /**
+   * Load template source with stat-based in-memory cache invalidation.
+   */
+  private async loadTemplate(templatePath: string): Promise<string> {
     try {
-      const file = Bun.file(templatePath);
-      const exists = await file.exists();
-      
-      if (!exists) {
-        throw new Error(`Template not found: ${templatePath}`);
+      const realTemplatePath = await this.resolveRealTemplatePath(templatePath);
+
+      if (this.cache && this.templateCache.has(templatePath)) {
+        const stats = await stat(realTemplatePath);
+        const cached = this.fileStatsCache.get(templatePath);
+
+        if (
+          stats.isFile() &&
+          cached &&
+          this.matchesCachedVersion(cached, realTemplatePath, stats)
+        ) {
+          return this.templateCache.get(templatePath)!;
+        }
       }
 
-      const content = await file.text();
-      const stats = await file.stat();
+      const { content, realPath, stats } = await this.readStableTemplate(
+        templatePath
+      );
 
-      // Cache content and stats
       if (this.cache) {
         this.templateCache.set(templatePath, content);
         this.fileStatsCache.set(templatePath, {
-          mtime: stats.mtime.getTime(),
+          realPath,
+          mtime: stats.mtimeMs,
+          ctime: stats.ctimeMs,
           size: stats.size,
+          dev: stats.dev,
+          ino: stats.ino,
         });
-        
-        // Limit cache size
+
         if (this.templateCache.size > 500) {
           const firstKey = this.templateCache.keys().next().value;
           if (firstKey) {
@@ -88,81 +246,59 @@ export class BladeRenderer {
       }
 
       return content;
-    } catch (error: any) {
-      if (error.message?.includes("No such file") || error.message?.includes("not found")) {
+    } catch (error: unknown) {
+      if (error instanceof BladePathError) {
+        throw error;
+      }
+
+      if (this.errorCode(error) === "ENOENT") {
         throw new Error(
           `Template not found: ${templatePath}\n` +
           `Make sure the template exists and viewsDir is correct: ${this.viewsDir}\n` +
           `Tip: Use dot notation like 'layouts.app' or full path like 'layouts/app.blade.html'`
         );
       }
+
       throw new Error(
         `Failed to load template: ${templatePath}\n` +
-        `Error: ${error.message}\n` +
+        `Error: ${this.errorMessage(error)}\n` +
         `Views directory: ${this.viewsDir}`
       );
     }
   }
 
   /**
-   * Resolve template path
-   * Support extension: .blade.html
-   * Support dot notation: layouts.app → layouts/app.blade.html
+   * Resolve a template name under viewsDir and reject lexical traversal.
    */
   private resolveTemplate(template: string): string {
-    // Nếu đã có extension .blade.html hoặc .blade, dùng luôn
-    if (template.endsWith(".blade.html") || template.endsWith(".blade")) {
-      return path.join(this.viewsDir, template);
+    if (!template || typeof template !== "string") {
+      throw new Error("BladeRenderer: template must be a non-empty string");
     }
-    
-    // Convert dot notation to path: layouts.app → layouts/app
-    // Nhưng giữ nguyên nếu đã có path separator
+
     let templatePath = template;
-    if (template.includes(".") && !template.includes("/") && !template.includes("\\")) {
-      templatePath = template.replace(/\./g, "/");
-    }
-    
-    // Mặc định dùng extension .blade.html
-    return path.join(this.viewsDir, `${templatePath}.blade.html`);
-  }
-
-  /**
-   * Extract extends directive
-   */
-  private extractExtends(content: string): string | null {
-    const match = content.match(/<!-- BLADE_EXTENDS:([^>]+) -->/);
-    return match ? match[1] : null;
-  }
-
-  /**
-   * Extract sections từ template
-   */
-  private extractSections(content: string): Map<string, string> {
-    const sections = new Map<string, string>();
-    const sectionRegex =
-      /<!-- BLADE_SECTION_START:([^>]+) -->([\s\S]*?)<!-- BLADE_SECTION_END:\1 -->/g;
-
-    let match;
-    while ((match = sectionRegex.exec(content)) !== null) {
-      const [, name, body] = match;
-      sections.set(name, body.trim());
+    if (!template.endsWith(".blade.html") && !template.endsWith(".blade")) {
+      if (
+        template.includes(".") &&
+        !template.includes("/") &&
+        !template.includes("\\")
+      ) {
+        templatePath = template.replace(/\./g, "/");
+      }
+      templatePath = `${templatePath}.blade.html`;
     }
 
-    return sections;
+    const resolved = path.resolve(this.viewsDir, templatePath);
+    this.assertWithinViews(resolved, template);
+    return resolved;
   }
 
   /**
-   * Process @yield trong layout
+   * Replace compiled @yield markers with compiled section source.
    */
   private processYields(
     content: string,
     sections: Map<string, string>
   ): string {
-    // Process @yield với default value
-    // Tìm cả markers đã compile và raw @yield (nếu chưa được compile)
-    
-    // 1. Process compiled markers: <!-- BLADE_YIELD:name --><!-- BLADE_DEFAULT:default -->
-    // Lưu ý: markers có thể có whitespace, cần trim
     content = content.replace(
       /<!--\s*BLADE_YIELD:([^>]+)\s*-->(?:<!--\s*BLADE_DEFAULT:([^>]+)\s*-->)?/g,
       (_match, name, defaultValue) => {
@@ -173,10 +309,8 @@ export class BladeRenderer {
         return defaultValue ? defaultValue.trim() : "";
       }
     );
-    
-    // 2. Process raw @yield nếu chưa được compile (fallback)
-    // Điều này xử lý trường hợp layout chưa được compile đúng
-    content = content.replace(
+
+    return content.replace(
       /@yield\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]*)['"])?\s*\)/g,
       (_match, name, defaultValue) => {
         const sectionName = name.trim();
@@ -186,279 +320,165 @@ export class BladeRenderer {
         return defaultValue ? defaultValue.trim() : "";
       }
     );
+  }
 
-    return content;
+  private circularCompositionError(
+    stack: readonly string[],
+    nextPath: string
+  ): Error {
+    const chain = [...stack, nextPath]
+      .map((item) => path.relative(this.viewsDir, item) || item)
+      .join(" -> ");
+    return new Error(`BladeRenderer: Circular template composition detected: ${chain}`);
   }
 
   /**
-   * Process @include directives với cache
+   * Inline compiled partial source. No partial is rendered here; the final
+   * composed EJS source is evaluated once by render().
    */
   private async processIncludes(
     content: string,
-    _templatePath: string,
-    data: Record<string, any>
+    stack: readonly string[]
   ): Promise<string> {
-    // Process @include with data
     const includeWithRegex =
       /<!-- BLADE_INCLUDE_WITH:([^:>]+):(\{[^}]+\}) -->/g;
-    for (const match of content.matchAll(includeWithRegex)) {
-      const [, partial, dataStr] = match;
-      const partialData = this.parseDataString(dataStr, data);
-      const partialPath = this.resolveTemplate(partial);
-      
-      // Generate cache key for include with data
-      const dataKey = JSON.stringify(partialData);
-      const includeCacheKey = `${partialPath}:${dataKey}`;
-      
-      // Check cache
-      if (this.cache && this.compiledIncludesCache.has(includeCacheKey)) {
-        content = content.replace(match[0], this.compiledIncludesCache.get(includeCacheKey)!);
-        continue;
+
+    for (const match of [...content.matchAll(includeWithRegex)]) {
+      const [, partial, dataExpression] = match;
+      const partialPath = this.resolveTemplate(partial.trim());
+      if (stack.includes(partialPath)) {
+        throw this.circularCompositionError(stack, partialPath);
       }
 
       const partialContent = await this.loadTemplate(partialPath);
-      const compiledPartial = await this.compileAndRender(
+      const compiledPartial = await this.compileTemplateSource(
         partialContent,
         partialPath,
-        { ...data, ...partialData }
+        [...stack, partialPath]
       );
-      
-      // Cache compiled include
-      if (this.cache) {
-        this.compiledIncludesCache.set(includeCacheKey, compiledPartial);
-        // Limit cache size
-        if (this.compiledIncludesCache.size > 500) {
-          const firstKey = this.compiledIncludesCache.keys().next().value;
-          if (firstKey) {
-            this.compiledIncludesCache.delete(firstKey);
-          }
-        }
-      }
-      
-      content = content.replace(match[0], compiledPartial);
+      const scopedPartial =
+        `<% { with ((` +
+        dataExpression +
+        `) || {}) { %>` +
+        compiledPartial +
+        `<% } } %>`;
+
+      content = content.replace(match[0], () => scopedPartial);
     }
 
-    // Process simple @include
     const includeRegex = /<!-- BLADE_INCLUDE:([^>]+) -->/g;
-    for (const match of content.matchAll(includeRegex)) {
+    for (const match of [...content.matchAll(includeRegex)]) {
       const [, partial] = match;
-      const partialPath = this.resolveTemplate(partial);
-      
-      // Cache key for simple include
-      const includeCacheKey = `${partialPath}:{}`;
-      
-      // Check cache
-      if (this.cache && this.compiledIncludesCache.has(includeCacheKey)) {
-        content = content.replace(match[0], this.compiledIncludesCache.get(includeCacheKey)!);
-        continue;
+      const partialPath = this.resolveTemplate(partial.trim());
+      if (stack.includes(partialPath)) {
+        throw this.circularCompositionError(stack, partialPath);
       }
 
       const partialContent = await this.loadTemplate(partialPath);
-      const compiledPartial = await this.compileAndRender(
+      const compiledPartial = await this.compileTemplateSource(
         partialContent,
         partialPath,
-        data
+        [...stack, partialPath]
       );
-      
-      // Cache compiled include
-      if (this.cache) {
-        this.compiledIncludesCache.set(includeCacheKey, compiledPartial);
-        if (this.compiledIncludesCache.size > 500) {
-          const firstKey = this.compiledIncludesCache.keys().next().value;
-          if (firstKey) {
-            this.compiledIncludesCache.delete(firstKey);
-          }
-        }
-      }
-      
-      content = content.replace(match[0], compiledPartial);
+
+      // A block keeps declarations in one partial from colliding with another.
+      const isolatedPartial = `<% { %>${compiledPartial}<% } %>`;
+      content = content.replace(match[0], () => isolatedPartial);
     }
 
     return content;
   }
 
-  /**
-   * Parse data string thành object
-   */
-  private parseDataString(
-    dataStr: string,
-    context: Record<string, any>
-  ): Record<string, any> {
-    try {
-      // Simple parser - support basic object syntax
-      // { key: value, key2: value2 }
-      const obj: Record<string, any> = {};
-      const pairs = dataStr.replace(/[{}]/g, "").split(",");
-
-      for (const pair of pairs) {
-        const [key, value] = pair.split(":").map((s) => s.trim());
-        if (key && value) {
-          // Remove quotes
-          const cleanValue = value.replace(/^['"]|['"]$/g, "");
-          // Try to get from context or use as literal
-          obj[key] = context[cleanValue] ?? cleanValue;
-        }
-      }
-
-      return obj;
-    } catch {
-      return {};
-    }
+  private stripBladeComments(content: string): string {
+    return content.replace(/\{\{--[\s\S]*?--\}\}/g, "");
   }
 
   /**
-   * Compile và render template (recursive cho layouts)
+   * Compose a raw Blade template into executable EJS source without rendering.
    */
-  private async compileAndRender(
-    content: string,
+  private async compileTemplateSource(
+    rawContent: string,
     templatePath: string,
-    data: Record<string, any>
+    stack: readonly string[]
   ): Promise<string> {
-    // Extract @extends từ raw content (trước khi compile)
+    const content = this.stripBladeComments(rawContent);
     const extendsMatch = content.match(/@extends\(['"]([^'"]+)['"]\)/);
     const layoutName = extendsMatch ? extendsMatch[1] : null;
-    
-    // Remove @extends directive từ raw content
     const contentWithoutExtends = content.replace(
       /@extends\(['"][^'"]+['"]\)\s*/g,
       ""
     );
 
-    // Extract sections từ raw content (trước khi compile)
-    // Tìm @section('name') ... @endsection hoặc @section('name', 'value')
     const rawSections = new Map<string, string>();
-    
-    // Extract @section('name', 'value') - short syntax
-    const shortSectionRegex = /@section\(['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]\)/g;
-    let match;
-    while ((match = shortSectionRegex.exec(contentWithoutExtends)) !== null) {
-      const [, name, value] = match;
+    const shortSectionRegex =
+      /@section\(['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]\)/g;
+    let sectionMatch: RegExpExecArray | null;
+
+    while ((sectionMatch = shortSectionRegex.exec(contentWithoutExtends)) !== null) {
+      const [, name, value] = sectionMatch;
       rawSections.set(name, value);
     }
-    
-    // Extract @section('name') ... @endsection - long syntax
-    const longSectionRegex = /@section\(['"]([^'"]+)['"]\)([\s\S]*?)@endsection/g;
-    while ((match = longSectionRegex.exec(contentWithoutExtends)) !== null) {
-      const [, name, body] = match;
+
+    const longSectionRegex =
+      /@section\(['"]([^'"]+)['"]\)([\s\S]*?)@endsection/g;
+    while ((sectionMatch = longSectionRegex.exec(contentWithoutExtends)) !== null) {
+      const [, name, body] = sectionMatch;
       if (!rawSections.has(name)) {
         rawSections.set(name, body.trim());
       }
     }
 
-    // Extract content không nằm trong section markers
     let contentBody = contentWithoutExtends;
     rawSections.forEach((_sectionBody, sectionName) => {
-      // Remove @section('name', 'value') - short syntax
+      const escapedName = sectionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const shortRegex = new RegExp(
-        `@section\\(['"]${sectionName}['"]\\s*,\\s*['"][^'"]*['"]\\)`,
+        `@section\\(['"]${escapedName}['"]\\s*,\\s*['"][^'"]*['"]\\)`,
         "g"
       );
-      contentBody = contentBody.replace(shortRegex, "");
-      
-      // Remove @section('name') ... @endsection - long syntax
       const longRegex = new RegExp(
-        `@section\\(['"]${sectionName}['"]\\)[\\s\\S]*?@endsection`,
+        `@section\\(['"]${escapedName}['"]\\)[\\s\\S]*?@endsection`,
         "g"
       );
-      contentBody = contentBody.replace(longRegex, "");
+      contentBody = contentBody.replace(shortRegex, "").replace(longRegex, "");
     });
     contentBody = contentBody.trim();
 
-    // Compile sections (sectionBody đã là raw content, cần compile)
     const compiledSections = new Map<string, string>();
     for (const [name, sectionBody] of rawSections.entries()) {
-      // Section body là raw content, cần compile
-      let compiledSection = this.compiler.compile(sectionBody, templatePath);
-      // Process includes trong section
-      compiledSection = await this.processIncludes(
-        compiledSection,
-        templatePath,
-        data
+      const compiledSection = this.compiler.compile(sectionBody, templatePath);
+      compiledSections.set(
+        name,
+        await this.processIncludes(compiledSection, stack)
       );
-      compiledSections.set(name, compiledSection);
     }
 
-    // Nếu không có section 'content' nhưng có content body, dùng làm content
-    if (!rawSections.has("content") && contentBody) {
-      let compiledContent = this.compiler.compile(contentBody, templatePath);
-      compiledContent = await this.processIncludes(
-        compiledContent,
-        templatePath,
-        data
+    if (!rawSections.has("content")) {
+      const compiledContent = contentBody
+        ? this.compiler.compile(contentBody, templatePath)
+        : "";
+      compiledSections.set(
+        "content",
+        await this.processIncludes(compiledContent, stack)
       );
-      compiledSections.set("content", compiledContent);
-    } else if (!rawSections.has("content")) {
-      // Nếu không có content, dùng empty string
-      compiledSections.set("content", "");
     }
 
-    // If extends layout, render with layout
     if (layoutName) {
       const layoutPath = this.resolveTemplate(layoutName);
-      const layoutContent = await this.loadTemplate(layoutPath);
-
-      // Compile layout (cached automatically by compiler)
-      let compiledLayout = this.compiler.compile(layoutContent, layoutPath);
-
-      // Process yields với compiled sections
-      compiledLayout = this.processYields(compiledLayout, compiledSections);
-
-      // Process includes in layout
-      compiledLayout = await this.processIncludes(
-        compiledLayout,
-        layoutPath,
-        data
-      );
-
-      // Render layout
-      try {
-        return ejs.render(compiledLayout, data, {
-          filename: layoutPath,
-          root: this.viewsDir,
-          async: false, // EJS sync mode
-        });
-      } catch (error: any) {
-        throw new Error(
-          `Failed to render layout: ${layoutPath}\n` +
-          `Error: ${error.message}\n` +
-          `This usually means there's a syntax error in the compiled template or missing data.\n` +
-          `Check the template at: ${layoutPath}`
-        );
+      if (stack.includes(layoutPath)) {
+        throw this.circularCompositionError(stack, layoutPath);
       }
+
+      const layoutContent = await this.loadTemplate(layoutPath);
+      let compiledLayout = this.compiler.compile(layoutContent, layoutPath);
+      compiledLayout = this.processYields(compiledLayout, compiledSections);
+      return this.processIncludes(compiledLayout, [...stack, layoutPath]);
     }
 
-    // Render without layout - compile all sections into final HTML
-    let finalContent = "";
-    if (compiledSections.has("content")) {
-      finalContent = compiledSections.get("content")!;
-    } else {
-      // Compile content body if no sections
-      finalContent = this.compiler.compile(contentBody, templatePath);
-      finalContent = await this.processIncludes(
-        finalContent,
-        templatePath,
-        data
-      );
-    }
-
-    try {
-      return ejs.render(finalContent, data, {
-        filename: templatePath,
-        root: this.viewsDir,
-        async: false, // EJS sync mode
-      });
-    } catch (error: any) {
-      throw new Error(
-        `Failed to render template: ${templatePath}\n` +
-        `Error: ${error.message}\n` +
-        `This usually means there's a syntax error in the compiled template or missing data.\n` +
-        `Check the template at: ${templatePath}`
-      );
-    }
+    return compiledSections.get("content") ?? "";
   }
 
   /**
-   * Render Blade template
+   * Render Blade template after composing all source into one EJS program.
    */
   async render(
     template: string,
@@ -466,16 +486,31 @@ export class BladeRenderer {
   ): Promise<string> {
     const templatePath = this.resolveTemplate(template);
     const content = await this.loadTemplate(templatePath);
-    return this.compileAndRender(content, templatePath, data);
+    const compiled = await this.compileTemplateSource(content, templatePath, [
+      templatePath,
+    ]);
+
+    try {
+      return ejs.render(compiled, data, {
+        filename: templatePath,
+        root: this.viewsDir,
+        async: false,
+      });
+    } catch (error: unknown) {
+      throw new Error(
+        `Failed to render template: ${templatePath}\n` +
+        `Error: ${this.errorMessage(error)}\n` +
+        `This usually means there's a syntax error in the compiled template or missing data.\n` +
+        `Check the template at: ${templatePath}`
+      );
+    }
   }
 
-  /**
-   * Clear all caches
-   */
+  /** Clear all in-memory source and compiler caches. */
   clearCache(): void {
     this.templateCache.clear();
-    this.compiledIncludesCache.clear();
     this.fileStatsCache.clear();
+    this.realViewsDir = undefined;
     this.compiler.clearCache();
   }
 }

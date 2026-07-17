@@ -1,6 +1,6 @@
 {
   "name": "leaf-blade",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Blade template engine for Leaf framework - Laravel Blade-like syntax for JavaScript/TypeScript",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,7 +15,8 @@
     "dev": "bun run src/index.ts",
     "test": "bun test",
     "test:watch": "bun test --watch",
-    "prepublishOnly": "bun run build && bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "bun run typecheck && bun test",
     "prepack": "bun run build"
   },
   "keywords": [
