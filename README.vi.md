@@ -2,7 +2,7 @@
 
 Blade template engine cho Leaf framework - Laravel Blade-like syntax cho JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-0.0.3-blue.svg)
+![Version](https://img.shields.io/badge/version-0.0.4-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -446,6 +446,32 @@ renderer.clearCache();
 
 ## 📋 Changelog
 
+### [0.0.4] - 2026-08-08
+
+#### Thêm mới
+
+- **Parser Module v2**: Thêm lexer, parser, và code generator architecture hoàn chỉnh
+  - `BladeLexer`: Tokenization với line/column tracking
+  - `BladeParser`: Parse tokens thành AST với validation đầy đủ
+  - `BladeCodeGenerator`: Generate EJS code từ AST
+  - `BladeCompilerV2`: Compiler mới với error diagnostics chi tiết
+  - `BladeTemplateError`: Custom error với source location
+- Export đầy đủ parser module qua public API
+- 62 tests mới cho parser module (tổng 116 tests)
+- Type definitions đầy đủ cho tất cả parser components
+
+#### Cải thiện
+
+- Bundle size tăng từ 22KB lên 54KB (do thêm parser module)
+- Error messages chi tiết hơn với line/column information
+- Compatibility tests giữa compiler cũ và mới
+
+#### Lưu ý
+
+- Parser v2 là optional, BladeRenderer mặc định vẫn dùng compiler cũ
+- Người dùng có thể chọn dùng `BladeCompilerV2` cho error reporting tốt hơn
+- Backward compatible 100% với v0.0.3
+
 ### [0.0.3] - 2026-07-17
 
 #### Bảo mật
@@ -516,7 +542,7 @@ Việc tìm template giờ bị giới hạn trong `viewsDir`. Nếu ứng dụn
 bun test
 ```
 
-Test suite hiện có 54 tests, bao gồm regression tests cho escaping, include composition, cache isolation và path traversal.
+Test suite hiện có 116 tests, bao gồm regression tests cho escaping, include composition, cache isolation, path traversal và đầy đủ parser module tests.
 
 ## 📝 License
 

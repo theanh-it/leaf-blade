@@ -2,7 +2,7 @@
 
 Blade template engine for Leaf framework - Laravel Blade-like syntax for JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-0.0.3-blue.svg)
+![Version](https://img.shields.io/badge/version-0.0.4-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -446,6 +446,32 @@ renderer.clearCache();
 
 ## 📋 Changelog
 
+### [0.0.4] - 2026-08-08
+
+#### Added
+
+- **Parser Module v2**: Complete lexer, parser, and code generator architecture
+  - `BladeLexer`: Tokenization with line/column tracking
+  - `BladeParser`: Parse tokens into AST with full validation
+  - `BladeCodeGenerator`: Generate EJS code from AST
+  - `BladeCompilerV2`: New compiler with detailed error diagnostics
+  - `BladeTemplateError`: Custom error with source location
+- Full parser module exports via public API
+- 62 new tests for parser module (116 tests total)
+- Complete type definitions for all parser components
+
+#### Improvements
+
+- Bundle size increased from 22KB to 54KB (due to parser module addition)
+- More detailed error messages with line/column information
+- Compatibility tests between old and new compiler
+
+#### Notes
+
+- Parser v2 is optional, BladeRenderer defaults to old compiler
+- Users can opt-in to `BladeCompilerV2` for better error reporting
+- 100% backward compatible with v0.0.3
+
 ### [0.0.3] - 2026-07-17
 
 #### Security
@@ -516,7 +542,7 @@ Template lookup is now confined to `viewsDir`. If an application used `../` path
 bun test
 ```
 
-The current suite contains 54 tests, including security regressions for escaping, include composition, cache isolation, and path traversal.
+The current suite contains 116 tests, including security regressions for escaping, include composition, cache isolation, path traversal, and complete parser module tests.
 
 ## 📝 License
 
