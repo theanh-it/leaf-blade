@@ -1,12 +1,14 @@
 {
   "name": "leaf-blade",
-  "version": "0.0.4",
-  "description": "Blade template engine for Leaf framework - Laravel Blade-like syntax for JavaScript/TypeScript",
+  "version": "1.0.0",
+  "description": "Blade template engine for Leaf framework - Laravel Blade-like syntax with native AST runtime (zero EJS dependency)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
     "README.md",
+    "README.vi.md",
+    "MIGRATION.md",
     "LICENSE"
   ],
   "scripts": {
