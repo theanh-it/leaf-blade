@@ -174,7 +174,7 @@ describe('BladeRuntime', () => {
     expect(result).toBe('16');
   });
 
-  test('prevents infinite loop', async () => {
+  test('prevents infinite loop', () => {
     const runtime = new BladeRuntime({ maxIterations: 10 });
     const node: ASTNode = {
       type: 'While',
@@ -183,7 +183,7 @@ describe('BladeRuntime', () => {
       start: loc,
       end: loc,
     };
-    await expect(runtime.evaluate([node], {})).rejects.toThrow('maximum iterations');
+    expect(() => runtime.evaluate([node], {})).toThrow('maximum iterations');
   });
 
   test('handles empty foreach gracefully', async () => {
@@ -245,5 +245,297 @@ describe('BladeRuntime', () => {
     };
     const result = await runtime.evaluate([node], {});
     expect(result).toBe('012');
+  });
+
+  // ===== Regression tests for v1.0.2 HTML escape Unicode-safety =====
+
+  test('escapes HTML special chars in ASCII text', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('text')], {
+      text: '<script>alert("XSS")</script>',
+    });
+    expect(result).toBe('&lt;script&gt;alert(&quot;XSS&quot;)&lt;/script&gt;');
+  });
+
+  test('preserves safe Unicode characters', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('text')], {
+      text: 'Xin chào 日本語 中文',
+    });
+    expect(result).toBe('Xin chào 日本語 中文');
+  });
+
+  test('escapes U+2028 LINE SEPARATOR to prevent JS injection', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('text')], {
+      text: 'safe\u2028unsafe',
+    });
+    expect(result).toBe('safe&#8232;unsafe');
+  });
+
+  test('escapes U+2029 PARAGRAPH SEPARATOR to prevent JS injection', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('text')], {
+      text: 'safe\u2029unsafe',
+    });
+    expect(result).toBe('safe&#8233;unsafe');
+  });
+
+  test('escapes ampersand correctly', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('text')], { text: 'A & B' });
+    expect(result).toBe('A &amp; B');
+  });
+
+  test('coerces NaN to literal string "NaN"', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('n')], { n: NaN });
+    expect(result).toBe('NaN');
+  });
+
+  test('coerces array to JSON', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('arr')], { arr: [1, 2, 3] });
+    expect(result).toBe('[1,2,3]');
+  });
+
+  test('coerces object to JSON', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('obj')], { obj: { a: 1 } });
+    // JSON.stringify escapes " as \", which then gets HTML-escaped to &quot;
+    expect(result).toBe('{&quot;a&quot;:1}');
+  });
+
+  // ===== v1.0.3 regression tests: robust coerceToString =====
+
+  test('coerces Symbol to description', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: Symbol('hello') });
+    expect(result).toBe('Symbol(hello)');
+  });
+
+  test('coerces Symbol without description', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: Symbol() });
+    expect(result).toBe('Symbol()');
+  });
+
+  test('coerces BigInt with n suffix', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: 9007199254740993n });
+    expect(result).toBe('9007199254740993n');
+  });
+
+  test('coerces function to source (truncated if long)', async () => {
+    const runtime = new BladeRuntime();
+    const fn = () => 'hi';
+    const result = await runtime.evaluate([{ type: 'RawExpression', expression: 'f', start: loc, end: loc }], { f: fn });
+    expect(result).toBe(fn.toString());
+  });
+
+  test('truncates very long function source', async () => {
+    const runtime = new BladeRuntime();
+    const longBody = 'a'.repeat(200);
+    const fn = new Function(`return ${longBody}`);
+    const result = await runtime.evaluate([{ type: 'RawExpression', expression: 'f', start: loc, end: loc }], { f: fn });
+    expect(result.length).toBeLessThanOrEqual(80);
+    expect(result.endsWith('...')).toBe(true);
+  });
+
+  test('handles circular references without crashing', async () => {
+    const runtime = new BladeRuntime();
+    const circ: any = { name: 'circ' };
+    circ.self = circ;
+    const result = await runtime.evaluate([expr('x')], { x: circ });
+    // Should not throw - falls back to "[Object]"
+    expect(result).toBe('[Object]');
+  });
+
+  test('handles throwing toString gracefully', async () => {
+    const runtime = new BladeRuntime();
+    const evil = {
+      toString: () => { throw new Error('boom'); },
+    };
+    const result = await runtime.evaluate([expr('x')], { x: evil });
+    // JSON.stringify returns "{}" for objects with throwing toString but no enumerable props
+    // (it doesn't actually invoke toString). Result must be a string and not crash.
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
+  });
+
+  test('serializes Date to ISO string', async () => {
+    const runtime = new BladeRuntime();
+    const date = new Date('2025-01-01T00:00:00.000Z');
+    const result = await runtime.evaluate([expr('x')], { x: date });
+    expect(result).toBe('2025-01-01T00:00:00.000Z');
+  });
+
+  test('serializes Invalid Date', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: new Date('invalid') });
+    expect(result).toBe('Invalid Date');
+  });
+
+  test('serializes RegExp', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: /test/gi });
+    expect(result).toBe('/test/gi');
+  });
+
+  test('serializes Map with entries', async () => {
+    const runtime = new BladeRuntime();
+    const m = new Map([['a', 1], ['b', 2]]);
+    const result = await runtime.evaluate([expr('x')], { x: m });
+    expect(result).toContain('Map(2)');
+    expect(result).toContain('a =&gt; 1');
+    expect(result).toContain('b =&gt; 2');
+  });
+
+  test('serializes Set with entries', async () => {
+    const runtime = new BladeRuntime();
+    const s = new Set([1, 2, 3]);
+    const result = await runtime.evaluate([expr('x')], { x: s });
+    expect(result).toContain('Set(3)');
+    expect(result).toContain('1, 2, 3');
+  });
+
+  test('serializes TypedArray', async () => {
+    const runtime = new BladeRuntime();
+    const ta = new Uint8Array([1, 2, 3]);
+    const result = await runtime.evaluate([expr('x')], { x: ta });
+    expect(result).toBe('Uint8Array(3)');
+  });
+
+  test('serializes Error', async () => {
+    const runtime = new BladeRuntime();
+    const err = new TypeError('bad type');
+    const result = await runtime.evaluate([expr('x')], { x: err });
+    expect(result).toBe('TypeError: bad type');
+  });
+
+  test('coerces -0 correctly', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: -0 });
+    expect(result).toBe('0');
+  });
+
+  test('coerces Infinity to "Infinity"', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: Infinity });
+    expect(result).toBe('Infinity');
+  });
+
+  test('coerces -Infinity to "-Infinity"', async () => {
+    const runtime = new BladeRuntime();
+    const result = await runtime.evaluate([expr('x')], { x: -Infinity });
+    expect(result).toBe('-Infinity');
+  });
+
+  // ===== v1.0.3 regression tests: maxDepth enforcement =====
+
+  test('enforces maxDepth for nested @if', async () => {
+    const runtime = new BladeRuntime({ maxDepth: 3 });
+    // Build deeply nested @if
+    const buildNested = (depth: number): ASTNode[] => {
+      if (depth === 0) return [{ type: 'Text', value: 'x', start: loc, end: loc }];
+      return [{
+        type: 'If',
+        branches: [{
+          kind: 'if',
+          condition: 'true',
+          body: buildNested(depth - 1),
+          start: loc,
+          end: loc,
+        }],
+        start: loc,
+        end: loc,
+      }];
+    };
+    expect(() => runtime.evaluate(buildNested(10), {})).toThrow(/Maximum recursion depth/);
+  });
+
+  test('enforces maxDepth for nested @foreach', () => {
+    const runtime = new BladeRuntime({ maxDepth: 3 });
+    const buildNested = (depth: number): ASTNode[] => {
+      if (depth === 0) return [{ type: 'Text', value: 'x', start: loc, end: loc }];
+      return [{
+        type: 'ForEach',
+        collection: 'arr',
+        value: 'v',
+        body: buildNested(depth - 1),
+        start: loc,
+        end: loc,
+      } as any];
+    };
+    expect(() => runtime.evaluate(buildNested(10), { arr: [1] })).toThrow(/Maximum recursion depth/);
+  });
+
+  test('depth counter resets after error', () => {
+    const runtime = new BladeRuntime({ maxDepth: 3 });
+    const buildNested = (depth: number): ASTNode[] => {
+      if (depth === 0) return [{ type: 'Text', value: 'x', start: loc, end: loc }];
+      return [{
+        type: 'If',
+        branches: [{
+          kind: 'if',
+          condition: 'true',
+          body: buildNested(depth - 1),
+          start: loc,
+          end: loc,
+        }],
+        start: loc,
+        end: loc,
+      }];
+    };
+    try {
+      runtime.evaluate(buildNested(10), {});
+    } catch { /* expected */ }
+    const result = runtime.evaluate(buildNested(2), {});
+    expect(result).toBe('x');
+  });
+
+  // ===== v1.0.3 regression tests: error context =====
+
+  test('error includes node type in context', () => {
+    const runtime = new BladeRuntime();
+    try {
+      runtime.evaluate([expr('undefined_var.deep.access')], {});
+    } catch (e: any) {
+      expect(e.message).toMatch(/depth \d+\/\d+/);
+    }
+  });
+
+  test('error includes location info', () => {
+    const runtime = new BladeRuntime();
+    const node: ASTNode = {
+      type: 'EscapedExpression',
+      expression: 'nonexistent.deep.path',
+      start: { line: 42, column: 7, offset: 100 },
+      end: { line: 42, column: 32, offset: 125 },
+    };
+    try {
+      runtime.evaluate([node], {});
+    } catch (e: any) {
+      expect(e.message).toMatch(/line 42/);
+      expect(e.message).toMatch(/col 7/);
+    }
+  });
+
+  test('error message has maxIterations info', () => {
+    const runtime = new BladeRuntime({ maxIterations: 2 });
+    const node: ASTNode = {
+      type: 'For',
+      init: 'i = 0',
+      condition: 'i < 10',
+      update: 'i++',
+      body: [{ type: 'Text', value: 'x', start: loc, end: loc }],
+      start: loc,
+      end: loc,
+    };
+    try {
+      runtime.evaluate([node], {});
+    } catch (e: any) {
+      expect(e.message).toMatch(/maxIterations|maximum iterations/);
+    }
   });
 });

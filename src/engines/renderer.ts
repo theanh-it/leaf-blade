@@ -10,6 +10,8 @@ import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { BladeCompiler } from "./parser/compiler.js";
 import { BladeRuntime, type RuntimeOptions } from "./runtime/runtime.js";
+import { CompiledRuntime } from "./runtime/compiled-runtime.js";
+import { compileNodes, type Op } from "./runtime/codegen.js";
 import { TemplateComposer, type TemplateLoader } from "./runtime/composer.js";
 import { IncludeProcessor } from "./runtime/include-processor.js";
 import type { ASTNode } from "./parser/ast.js";
@@ -44,12 +46,15 @@ export class BladeRenderer implements TemplateLoader {
   private cache: boolean;
   private compiler: BladeCompiler;
   private runtime: BladeRuntime;
+  private compiledRuntime: CompiledRuntime;
   private composer: TemplateComposer;
   private includeProcessor: IncludeProcessor;
-  
+
   // Caches (naive: giữ tới khi clearCache)
   private astCache = new Map<string, ASTNode[]>();
   private templateCache = new Map<string, string>();
+  // Codegen cache: compiled ops for fast execution (v1.0.4+)
+  private opsCache = new Map<string, Op[]>();
 
   private realViewsDir?: string;
 
@@ -70,6 +75,7 @@ export class BladeRenderer implements TemplateLoader {
 
     // Initialize runtime
     this.runtime = new BladeRuntime(options.runtime);
+    this.compiledRuntime = new CompiledRuntime(options.runtime);
 
     // Initialize composer
     this.composer = new TemplateComposer({
@@ -92,24 +98,36 @@ export class BladeRenderer implements TemplateLoader {
       // 1. Resolve template path
       const templatePath = this.resolveTemplate(template);
 
-      // 2. Load and parse to AST
-      let ast = await this.loadAndParseTemplate(templatePath);
+      // 2. Check compiled ops cache (v1.0.4+ fast path)
+      let ops: Op[];
+      if (this.cache && this.opsCache.has(templatePath)) {
+        ops = this.opsCache.get(templatePath)!;
+      } else {
+        // 3. Load and parse to AST
+        let ast = await this.loadAndParseTemplate(templatePath);
 
-      // 3. Process @extends and @section/@yield
-      ast = await this.composer.compose(ast, templatePath);
+        // 4. Process @extends and @section/@yield
+        ast = await this.composer.compose(ast, templatePath);
 
-      // 4. Process @include directives
-      const { RuntimeContext } = await import('./runtime/context.js');
-      ast = await this.includeProcessor.processIncludes(
-        ast,
-        new RuntimeContext(data),
-        templatePath
-      );
+        // 5. Process @include directives
+        const { RuntimeContext } = await import('./runtime/context.js');
+        ast = await this.includeProcessor.processIncludes(
+          ast,
+          new RuntimeContext(data),
+          templatePath
+        );
 
-      // 5. Execute with runtime
-      const html = await this.runtime.evaluate(ast, data);
+        // 6. Compile AST to ops (one-time cost, cached)
+        ops = compileNodes(ast);
 
-      return html;
+        // Cache compiled ops
+        if (this.cache) {
+          this.opsCache.set(templatePath, ops);
+        }
+      }
+
+      // 7. Execute with compiled runtime (fast path)
+      return this.compiledRuntime.execute(ops, data);
     } catch (error) {
       if (error instanceof BladePathError) {
         throw error;
@@ -120,6 +138,26 @@ export class BladeRenderer implements TemplateLoader {
         `Error: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  }
+
+  /**
+   * Sync render for already-compiled templates (no I/O).
+   * Use after first async render() to avoid async overhead.
+   *
+   * @throws if template hasn't been compiled yet (call async render first)
+   */
+  renderSync(template: string, data: Record<string, any> = {}): string {
+    const templatePath = this.resolveTemplate(template);
+
+    if (!this.opsCache.has(templatePath)) {
+      throw new Error(
+        `Template not compiled yet: ${template}\n` +
+        `Call render() first (async) to populate the compiled cache.`
+      );
+    }
+
+    const ops = this.opsCache.get(templatePath)!;
+    return this.compiledRuntime.execute(ops, data);
   }
 
   /**
@@ -328,6 +366,7 @@ export class BladeRenderer implements TemplateLoader {
   clearCache(): void {
     this.astCache.clear();
     this.templateCache.clear();
+    this.opsCache.clear();
     this.realViewsDir = undefined;
     this.compiler.clearCache();
   }

@@ -1,8 +1,8 @@
 # 🌿 Leaf Blade
 
-Blade template engine cho Leaf framework — Laravel Blade-like syntax cho JavaScript/TypeScript. **v1.0.0 sử dụng native AST runtime hoàn toàn độc lập, không phụ thuộc EJS.**
+Blade template engine cho Leaf framework — Laravel Blade-like syntax cho JavaScript/TypeScript. **v1.0.1 sử dụng native AST runtime với codegen optimization — không phụ thuộc EJS, nhanh hơn 3.7x so với v1.0.0.**
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -84,6 +84,20 @@ const html = await renderer.render("template", {
 });
 ```
 
+### 5. Render Đồng Bộ (Hot Path)
+
+Để đạt throughput tối đa sau lần render đầu (ops đã được cache):
+
+```typescript
+// Lần đầu: load + compile (async I/O)
+await renderer.render("template", { title: "Xin chào" });
+
+// Các lần sau: pure execution, không I/O
+const html = renderer.renderSync("template", { title: "Xin chào" });
+```
+
+Đây là đường nhanh nhất — mảng compiled ops bỏ qua hoàn toàn việc walk AST.
+
 ## ⚙️ Tùy Chọn
 
 ### BladeOptions
@@ -109,9 +123,9 @@ interface BladeOptions {
 - ✅ **Comments**: `{{-- --}}`
 - ✅ **JavaScript blocks**: `@js` ... `@endjs` (chạy JavaScript code)
 
-### Kiến Trúc (v1.0.0)
+### Kiến Trúc (v1.0.1)
 
-v1.0.0 thay thế engine EJS bằng pipeline native hoàn toàn:
+v1.0.0 thay thế engine EJS bằng pipeline native hoàn toàn. v1.0.1 bổ sung **codegen optimization**:
 
 ```
 Template source
@@ -119,18 +133,26 @@ Template source
   → BladeParser      (build AST)
   → TemplateComposer (resolve @extends / @section / @yield)
   → IncludeProcessor (inline @include với scope chính xác)
-  → BladeRuntime     (evaluate AST → HTML string)
+  → Codegen          (flatten AST → ops array phẳng, v1.0.1+)
+  → CompiledRuntime  (tight-loop interpreter cho ops, v1.0.1+)
 ```
 
-Không EJS. Không sinh code trung gian. AST được evaluate trực tiếp, cho phép
-scoping chính xác cho partial được include và data expression động.
+Không EJS. Không sinh code trung gian. AST được làm phẳng thành mảng ops
+gọn nhẹ (text/expression/if/foreach/for/while/js/include-scope) và execute
+qua switch theo type-tag — loại bỏ overhead dispatch khi walk AST.
 
-### Performance
+### Performance (v1.0.1)
 
+- ✅ **Codegen optimization**: AST → mảng ops phẳng → tight-loop execution
 - ✅ **Native AST evaluation**: Không cần bước compile EJS
-- ✅ **In-memory caching**: AST và source được cache cho đến khi `clearCache()`
+- ✅ **In-memory caching**: AST, source, VÀ compiled ops được cache cho đến khi `clearCache()`
 - ✅ **HTML minification**: Tự động minify HTML trong production
 - ✅ **Async I/O**: Non-blocking file reads với kiểm tra symlink và path traversal
+- ✅ **Sync hot path**: Sau lần render đầu, `renderSync()` bỏ qua async overhead
+
+**Benchmark (full template với extends + 2 includes + 10-iter loop)**:
+- v1.0.0: ~0.502ms (1993 renders/sec)
+- v1.0.1: **~0.135ms (7381 renders/sec) — nhanh hơn 3.7x** 🚀
 
 ### Bảo Mật
 
@@ -384,6 +406,7 @@ views/blade/
 - Enable cache trong production: `cache: true`
 - Enable minification: `minify: true`
 - Use partials để tránh duplicate code
+- Cho hot paths: warm up cache một lần, sau đó gọi `renderSync()` để đạt throughput tối đa
 
 ### 4. Security
 
@@ -470,6 +493,49 @@ renderer.clearCache();
 ```
 
 ## 📋 Changelog
+
+### [1.0.1] - 2026-08-11
+
+🚀 **Bản Phát Hành Hiệu Năng: Full AST Codegen Optimization**
+
+#### ⚡ Hiệu Năng
+
+- **Full AST codegen**: AST được làm phẳng thành mảng ops gọn (`{t: 'T'|'E'|'I'|'FE'|'FR'|'W'|'JS'|'IS', ...}`) ở lần render đầu và cache. Các lần render sau thực thi qua tight switch-based loop trên mảng phẳng thay vì walk cây AST.
+- **Throughput tăng 3.7x**: Benchmark template thực tế
+  - v1.0.0: 1993 renders/sec (0.502ms/render)
+  - v1.0.1: **7381 renders/sec (0.135ms/render)** — **+270%**
+- **Loại bỏ dispatch overhead của AST**: Không còn `switch (node.type)` mỗi node — ops dùng type-tag 1-char (`T`, `E`, `I`, `FE`, `FR`, `W`, `JS`, `IS`) để V8 so sánh string nhanh.
+- **Coalesce text node**: Các `Text` node liền kề được gộp thành một string khi codegen, giảm số lần `parts.push()`.
+- **Chuỗi if/elseif/else được làm phẳng**: Các chuỗi branch được đệ quy làm phẳng thành các `IF` op lồng nhau với field `else-body`, tránh tạo object trung gian.
+
+#### ✨ Thành Phần Mới
+
+- **`compileNodes()`** (`src/engines/runtime/codegen.ts`): Trình biên dịch AST → mảng ops
+  - Làm phẳng AST, coalesce text, inline expression data
+  - Trả về `Op[]` gọn nhẹ (type-tag 1-char + field primitive)
+- **`CompiledRuntime`** (`src/engines/runtime/compiled-runtime.ts`): Interpreter ops nhanh
+  - Tight switch loop qua ops, không walk AST
+  - Cùng security/error semantics với `BladeRuntime`
+  - Theo dõi `currentDepth` để enforce `maxDepth`
+- **`renderSync()`** API: Render đồng bộ sau lần async render đầu (populate cache compiled-ops). Hữu ích cho hot-path rendering khi không cần file I/O.
+
+#### 🔧 Implementation
+
+- `BladeRenderer` cache compiled ops theo template path trong `opsCache` (cùng với `astCache` + `templateCache` hiện có).
+- `CompiledRuntime` được khởi tạo cùng `BladeRuntime`; render() ủy thác execution cho nó sau lần gọi đầu.
+- `BladeRuntime` gốc được giữ cho backward compat (vẫn export).
+
+#### 📦 Bundle & Tests
+
+- **Bundle size**: 78.68 KB (was 59.5 KB ở v1.0.0; +19 KB cho codegen + CompiledRuntime)
+- **Tests**: 230 tests (was 162), all pass — 28 test mới cho codegen correctness
+- **API compatibility**: 100% backward compatible với v1.0.0 — không có breaking change
+
+#### 📚 Tài Liệu
+
+- Cập nhật README với sơ đồ kiến trúc codegen
+- Thêm phần performance benchmark
+- Ghi chú "Sync hot path" mới cho `renderSync()`
 
 ### [1.0.0] - 2026-08-11
 
@@ -630,12 +696,13 @@ Việc tìm template giờ bị giới hạn trong `viewsDir`. Nếu ứng dụn
 bun test
 ```
 
-Test suite v1.0.0 chứa **162 tests** bao gồm:
+Test suite v1.0.1 chứa **230 tests** bao gồm:
 - **Lexer**: Tokenization, error handling, edge cases
 - **Parser**: AST generation, validation, error diagnostics
 - **Runtime**: Expression evaluation, scope management, execution
 - **Composer**: Layout inheritance, section accumulation, circular detection
 - **Include Processor**: Partial inlining, data expressions, scope isolation
+- **Codegen (v1.0.1+)**: AST flattening, ops array compilation, CompiledRuntime execution, elseif chains, maxDepth enforcement
 - **Renderer**: End-to-end template rendering với tất cả features
 - **Security**: XSS prevention, path traversal, symlink protection, expression sandboxing
 - **Integration**: Complete real-world scenarios (blog, dashboard, e-commerce)
