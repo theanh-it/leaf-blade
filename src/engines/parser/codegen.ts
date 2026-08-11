@@ -2,14 +2,10 @@
  * Code generator: AST → EJS source.
  *
  * @remarks
- * Mục tiêu: tạo ra cùng EJS source như compiler cũ sinh ra, không phải
- * thay đổi behavior. Renderer hiện tại (`BladeRenderer`) nhận string EJS
- * với các marker `BLADE_INCLUDE`, `BLADE_YIELD`, `BLADE_SECTION_START/END`,
- * `BLADE_DEFAULT` — nên codegen sinh ra cả hai phần:
- *  - EJS executable statements (`<% %>`, `<%= %>`, `<%- %>`)
- *  - Blade markers cho renderer xử lý layout/include/section
- *
- * Khi renderer cũ được thay thế, codegen có thể được cập nhật để bỏ marker.
+ * `BladeRenderer` (native runtime, v1.0.0+) evaluate AST trực tiếp và
+ * KHÔNG dùng module này. Codegen được giữ lại như một pipeline độc lập
+ * (lexer → parser → codegen) sinh ra EJS source thuần, hữu ích cho debug,
+ * so sánh output, hoặc tái sử dụng ở nơi khác cần EJS string thay vì AST.
  */
 import type {
   ASTNode,
@@ -27,7 +23,12 @@ import type {
 } from "./ast.js";
 
 export interface CodeGenOptions {
-  /** Compiler class sẽ dùng output này với renderer cũ */
+  /**
+   * Khi `true` (mặc định), sinh thêm marker `<!-- BLADE_* -->` bên cạnh EJS
+   * cho layout/section/yield/include — hữu ích khi cần xử lý layout ở tầng
+   * ngoài EJS. Khi `false`, output chỉ chứa EJS thuần (dùng cho
+   * `compilePure()`).
+   */
   preserveMarkers?: boolean;
 }
 

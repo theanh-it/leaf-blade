@@ -218,6 +218,12 @@ export class BladeLexer {
       return this.makeToken("END", name, start, end, { directive: name });
     }
 
+    // @js không nhận args; toàn bộ nội dung tới @endjs là body (text).
+    // Không capture inline args để tránh nuốt dòng code đầu tiên.
+    if (name === "js") {
+      return this.makeToken("DIRECTIVE", name, start, end, { directive: name });
+    }
+
     // elseif cũng nhận args (`@elseif(condition)`); nếu không có args thì rỗng.
     // Block directives (if/foreach/for/while/include/section/yield/extends/js)
     // cũng được xử lý tại đây.

@@ -18,6 +18,7 @@ export type ASTNode =
   | SectionNode
   | YieldNode
   | IncludeNode
+  | IncludeScopeNode
   | JsNode
   | CommentNode;
 
@@ -96,6 +97,19 @@ export interface IncludeNode extends BaseNode {
   partial: string;
   /** Raw expression object (chỉ được parser set nếu cú pháp an toàn) */
   dataExpression?: string;
+}
+
+/**
+ * Kết quả của việc xử lý `@include('partial', { data })` ở giai đoạn
+ * IncludeProcessor: AST của partial được inline vào `body`, còn
+ * `dataExpression` được giữ nguyên (chưa evaluate) để runtime evaluate
+ * đúng lúc — vì data có thể tham chiếu biến loop (`@foreach(users as user)`)
+ * chỉ tồn tại trong scope lúc runtime, không tồn tại lúc include-processing.
+ */
+export interface IncludeScopeNode extends BaseNode {
+  type: "IncludeScope";
+  dataExpression: string;
+  body: ASTNode[];
 }
 
 export interface JsNode extends BaseNode {

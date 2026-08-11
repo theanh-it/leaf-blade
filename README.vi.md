@@ -1,8 +1,8 @@
 # 🌿 Leaf Blade
 
-Blade template engine cho Leaf framework - Laravel Blade-like syntax cho JavaScript/TypeScript.
+Blade template engine cho Leaf framework — Laravel Blade-like syntax cho JavaScript/TypeScript. **v1.0.0 sử dụng native AST runtime hoàn toàn độc lập, không phụ thuộc EJS.**
 
-![Version](https://img.shields.io/badge/version-0.0.4-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -102,18 +102,43 @@ interface BladeOptions {
 ### Template Syntax
 
 - ✅ **Layout inheritance**: `@extends`, `@section`, `@yield`
-- ✅ **Partials**: `@include` với hỗ trợ data
+- ✅ **Partials**: `@include` với hỗ trợ data (kể cả data expression trong vòng lặp)
 - ✅ **Conditionals**: `@if`, `@elseif`, `@else`, `@endif`
 - ✅ **Loops**: `@foreach`, `@for`, `@while`
 - ✅ **Variables**: `{{ }}` (escaped), `{!! !!}` (raw)
 - ✅ **Comments**: `{{-- --}}`
 - ✅ **JavaScript blocks**: `@js` ... `@endjs` (chạy JavaScript code)
 
+### Kiến Trúc (v1.0.0)
+
+v1.0.0 thay thế engine EJS bằng pipeline native hoàn toàn:
+
+```
+Template source
+  → BladeLexer       (tokenize)
+  → BladeParser      (build AST)
+  → TemplateComposer (resolve @extends / @section / @yield)
+  → IncludeProcessor (inline @include với scope chính xác)
+  → BladeRuntime     (evaluate AST → HTML string)
+```
+
+Không EJS. Không sinh code trung gian. AST được evaluate trực tiếp, cho phép
+scoping chính xác cho partial được include và data expression động.
+
 ### Performance
 
-- ✅ **In-memory cache an toàn**: Chỉ cache source và kết quả compile
+- ✅ **Native AST evaluation**: Không cần bước compile EJS
+- ✅ **In-memory caching**: AST và source được cache cho đến khi `clearCache()`
 - ✅ **HTML minification**: Tự động minify HTML trong production
-- ✅ **Async I/O**: Sử dụng async file operations
+- ✅ **Async I/O**: Non-blocking file reads với kiểm tra symlink và path traversal
+
+### Bảo Mật
+
+- ✅ **XSS protection**: `{{ }}` HTML-escape output theo mặc định
+- ✅ **Ngăn path traversal**: Tất cả template path bị giới hạn trong `viewsDir`
+- ✅ **Bảo vệ symlink**: Symlink trỏ ra ngoài `viewsDir` bị từ chối
+- ✅ **Expression sandboxing**: `ExpressionEvaluator` dùng `Proxy` + `with` scope; chặn các identifier nguy hiểm
+- ✅ **Loop / recursion limits**: Ngăn template vô hạn làm cạn bộ nhớ
 
 ## 📖 Hướng Dẫn Chi Tiết
 
@@ -446,6 +471,69 @@ renderer.clearCache();
 
 ## 📋 Changelog
 
+### [1.0.0] - 2026-08-11
+
+🎉 **Bản phát hành chính: Native AST Runtime — Không phụ thuộc EJS**
+
+#### 🚀 Breaking Changes
+
+- **Gỡ bỏ phụ thuộc EJS**: Engine giờ dùng AST interpreter native hoàn toàn. EJS không còn cần thiết ở runtime và đã được chuyển sang `devDependencies`.
+- **Xóa các component engine cũ**:
+  - `BladeCompiler` (regex-based, sinh EJS) → thay bằng `BladeCompiler` (AST-based)
+  - `BladeRenderer` (EJS-based) → thay bằng `BladeRenderer` (native runtime)
+  - `SimpleRenderer` → đã xóa (được thay thế bởi native runtime)
+- **API không đổi**: Nếu bạn đang dùng `BladeRenderer` hoặc `bladePlugin`, code của bạn sẽ hoạt động mà không cần sửa. Các component mới dùng cùng tên và API.
+
+#### ✨ Kiến Trúc Mới
+
+**Native Pipeline**:
+```
+Template → Lexer → Parser → AST → Composer → Include Processor → Runtime → HTML
+```
+
+**Các Component Cốt Lõi**:
+- **`BladeLexer`**: Tokenize Blade syntax với line/column tracking
+- **`BladeParser`**: Xây dựng typed AST từ tokens với validation đầy đủ
+- **`BladeRuntime`**: Evaluate AST trực tiếp bằng native JavaScript execution
+- **`TemplateComposer`**: Resolve `@extends`, `@section`, và `@yield` ở cấp AST
+- **`IncludeProcessor`**: Inline `@include` directives với lexical scoping chính xác
+- **`ExpressionEvaluator`**: Evaluate expression an toàn dùng `Proxy` + `with` scope
+- **`RuntimeContext`**: Quản lý template scope với quan hệ parent-child
+
+#### 🐛 Sửa Lỗi
+
+- **Sửa `@include` với data trong vòng lặp**: `@include('partial', { item: item })` giờ truy cập đúng loop variables. Trước đây, data expressions được evaluate quá sớm và không thấy dynamic scope.
+- **Sửa nested section accumulation**: Child templates extend layouts có `@extends` riêng giờ tích lũy sections đúng mà không bị trùng lặp.
+- **Sửa circular layout detection**: Phát hiện và báo lỗi đúng cho circular `@extends` chains.
+
+#### 🔒 Cải Thiện Bảo Mật
+
+- **Expression sandboxing**: `ExpressionEvaluator` chặn truy cập globals nguy hiểm (`process`, `require`, `eval`, `Function`, v.v.)
+- **Loop limits**: Ngăn infinite loops với iteration limits có thể cấu hình
+- **Recursion limits**: Bảo vệ khỏi stack overflow từ templates lồng sâu
+- **Safer scope isolation**: Include data được cô lập đúng dùng `Object.create()` cho child scopes
+
+#### 📦 Bundle & Performance
+
+- **Bundle size**: 59.5 KB (v0.0.4 là 54 KB, tăng do complete runtime)
+- **Test coverage**: 162 tests (v0.0.4 là 116), tất cả pass
+- **Native evaluation**: AST evaluation nhanh hơn EJS compilation + execution với hầu hết templates
+- **Naive caching**: Templates được cache cho đến khi gọi `clearCache()` — không tự stat file để có performance tối đa
+
+#### 📚 Tài Liệu
+
+- Cập nhật README với tổng quan kiến trúc v1.0.0
+- Thêm các ghi chú chi tiết về security và performance
+- Document tất cả runtime components mới trong public API
+- Xem `MIGRATION.md` để biết hướng dẫn nâng cấp từ v0.0.4 → v1.0.0
+
+#### 🙏 Migration Notes
+
+Với hầu hết users, v1.0.0 là drop-in replacement. Nếu bạn đang dùng internal APIs:
+- `BladeCompilerV2` → `BladeCompiler` (cùng API, đổi tên)
+- `BladeRendererV2` → `BladeRenderer` (cùng API, đổi tên)
+- Regex-based compiler cũ đã xóa (dùng `BladeCompiler.compile()` cho EJS output nếu cần)
+
 ### [0.0.4] - 2026-08-08
 
 #### Thêm mới
@@ -542,7 +630,17 @@ Việc tìm template giờ bị giới hạn trong `viewsDir`. Nếu ứng dụn
 bun test
 ```
 
-Test suite hiện có 116 tests, bao gồm regression tests cho escaping, include composition, cache isolation, path traversal và đầy đủ parser module tests.
+Test suite v1.0.0 chứa **162 tests** bao gồm:
+- **Lexer**: Tokenization, error handling, edge cases
+- **Parser**: AST generation, validation, error diagnostics
+- **Runtime**: Expression evaluation, scope management, execution
+- **Composer**: Layout inheritance, section accumulation, circular detection
+- **Include Processor**: Partial inlining, data expressions, scope isolation
+- **Renderer**: End-to-end template rendering với tất cả features
+- **Security**: XSS prevention, path traversal, symlink protection, expression sandboxing
+- **Integration**: Complete real-world scenarios (blog, dashboard, e-commerce)
+
+Tất cả tests pass với 100% success rate.
 
 ## 📝 License
 
