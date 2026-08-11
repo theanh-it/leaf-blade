@@ -1,6 +1,6 @@
 {
   "name": "leaf-blade",
-  "version": "1.0.5",
+  "version": "1.0.1",
   "description": "Blade template engine for Leaf framework - Laravel Blade-like syntax with native AST runtime (zero EJS dependency)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
