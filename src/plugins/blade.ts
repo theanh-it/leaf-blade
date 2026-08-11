@@ -56,11 +56,10 @@ export const bladePlugin = (options: BladeOptions = {}) => {
     throw new Error("bladePlugin: minify must be a boolean");
   }
 
-  // Create Blade renderer
+  // Create Blade renderer (v1.0.0: native runtime, không phụ thuộc EJS)
   const renderer = new BladeRenderer({
     viewsDir,
     cache,
-    cacheDir: options.cacheDir,
   });
 
   return (app: Elysia) => {

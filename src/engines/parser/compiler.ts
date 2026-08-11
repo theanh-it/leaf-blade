@@ -1,18 +1,12 @@
 /**
- * Compiler mới dùng pipeline lexer → parser → codegen.
+ * Compiler dùng pipeline lexer → parser → codegen.
  *
- * API tương thích với `BladeCompiler` cũ:
- *  - Constructor(options)
- *  - compile(content, path) → string EJS
- *  - clearCache()
+ * `parse()` là API chính, được `BladeRenderer` (native runtime) dùng để
+ * lấy AST rồi evaluate trực tiếp (không qua EJS).
  *
- * Compiler này KHÔNG thay thế `BladeCompiler` cũ. Nó chạy song song để
- * người dùng có thể từng bước chuyển đổi. Khi cờ `COMPATIBILITY_MODE`
- * được bật, codegen vẫn sinh ra các marker `BLADE_*` để renderer cũ
- * hiểu được (extends, section, yield, include).
- *
- * Khi chuyển sang renderer mới, có thể tắt compat mode để renderer
- * đọc thẳng AST.
+ * `compile()`/`compilePure()` sinh ra EJS source string (giữ lại cho ai
+ * muốn tái sử dụng pipeline lexer/parser/codegen độc lập với runtime,
+ * ví dụ debug hoặc tooling khác); `BladeRenderer` không dùng các method này.
  */
 import { createHash } from "node:crypto";
 import { BladeLexer } from "./lexer.js";
@@ -20,26 +14,27 @@ import { BladeParser } from "./parser.js";
 import { BladeCodeGenerator } from "./codegen.js";
 import { BladeTemplateError } from "./diagnostics.js";
 
-export interface BladeCompileOptionsV2 {
+export interface BladeCompileOptions {
   viewsDir: string;
   /** @deprecated Reserved for backward compatibility. */
   cacheDir?: string;
   cache?: boolean;
   /**
-   * Khi `true` (mặc định), codegen sinh ra marker `BLADE_*` để renderer cũ
-   * xử lý layout/include/section. Khi `false`, output chỉ chứa EJS.
+   * Khi `true` (mặc định), `compile()` sinh thêm marker `BLADE_*` bên cạnh
+   * EJS cho layout/section/yield/include. `BladeRenderer` không dùng
+   * `compile()`/marker này — chỉ ảnh hưởng khi gọi trực tiếp compiler này.
    */
   compatibilityMode?: boolean;
 }
 
-export class BladeCompilerV2 {
+export class BladeCompiler {
   private cache: boolean;
   private compatibilityMode: boolean;
   private compiledCache = new Map<string, string>();
 
-  constructor(options: BladeCompileOptionsV2) {
+  constructor(options: BladeCompileOptions) {
     if (!options.viewsDir || typeof options.viewsDir !== "string") {
-      throw new Error("BladeCompilerV2: viewsDir is required and must be a string");
+      throw new Error("BladeCompiler: viewsDir is required and must be a string");
     }
     this.cache = options.cache ?? true;
     this.compatibilityMode = options.compatibilityMode ?? true;
@@ -65,7 +60,7 @@ export class BladeCompilerV2 {
         throw error;
       }
       throw new Error(
-        `BladeCompilerV2: Failed to compile ${templatePath}: ${
+        `BladeCompiler: Failed to compile ${templatePath}: ${
           error instanceof Error ? error.message : String(error)
         }`
       );

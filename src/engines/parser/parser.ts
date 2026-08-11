@@ -16,7 +16,7 @@ import {
   type BladeSourceLocation,
 } from "./diagnostics.js";
 import type { BladeToken } from "./lexer.js";
-import type { ASTNode, IfNode, SectionNode } from "./ast.js";
+import type { ASTNode, IfNode, JsNode, SectionNode } from "./ast.js";
 
 export interface ParseOptions {
   templatePath?: string;
@@ -30,6 +30,8 @@ interface BodyFrame {
   kind: "foreach" | "for" | "while" | "js";
   body: ASTNode[];
   start: BladeSourceLocation;
+  /** Chỉ dùng cho kind === "js": node để ghi code vào khi gặp @endjs */
+  jsNode?: JsNode;
 }
 interface SectionFrame {
   kind: "section";
@@ -257,13 +259,14 @@ export class BladeParser {
 
         if (directive === "js") {
           const body: ASTNode[] = [];
-          stack.push({ kind: "js", body, start: token.start });
-          pendingAppend.push({
+          const jsNode: JsNode = {
             type: "Js",
             code: "",
             start: token.start,
             end: token.start,
-          });
+          };
+          stack.push({ kind: "js", body, start: token.start, jsNode });
+          pendingAppend.push(jsNode);
           pendingAppend = body;
           continue;
         }
@@ -356,6 +359,11 @@ export class BladeParser {
           const frame = stack[stack.length - 1];
           if (!frame || frame.kind !== "js") {
             throw this.error("BLADE_UNEXPECTED_END", `@endjs without matching @js`, token.start);
+          }
+          // Gom toàn bộ text trong body @js thành code JavaScript.
+          if (frame.jsNode) {
+            frame.jsNode.code = this.collectJsCode(frame.body);
+            frame.jsNode.end = token.end;
           }
           stack.pop();
           pendingAppend = this.ownerBody(stack, root);
@@ -451,6 +459,20 @@ export class BladeParser {
     }
   }
 
+  /**
+   * Gom text node bên trong @js ... @endjs thành một chuỗi code.
+   * Chỉ chấp nhận text (không cho phép directive lồng trong @js).
+   */
+  private collectJsCode(body: ASTNode[]): string {
+    let code = "";
+    for (const node of body) {
+      if (node.type === "Text") {
+        code += node.value;
+      }
+    }
+    return code.trim();
+  }
+
   private requireArgs(
     directive: string,
     args: string,
@@ -504,33 +526,71 @@ export class BladeParser {
   }
 
   /**
-   * Parse string literal an toàn: chấp nhận dạng `'foo'` hoặc `"foo"`.
+   * Parse tên template/section: chấp nhận string literal `'foo'` / `"foo"`
+   * HOẶC identifier không dấu nháy (`layouts.app`, `components.product-card`).
+   *
+   * Trả về `null` nếu không hợp lệ để caller tự phát lỗi phù hợp.
+   */
+  private parseNameToken(token: string): string | null {
+    const trimmed = token.trim();
+    if (trimmed.length === 0) return null;
+
+    // Quoted string literal
+    const quoted = /^(['"])([^'"]*)\1$/.exec(trimmed);
+    if (quoted) {
+      return quoted[2];
+    }
+
+    // Unquoted identifier: chữ, số, `. - _ /`
+    if (/^[\w.\-/]+$/.test(trimmed)) {
+      return trimmed;
+    }
+
+    return null;
+  }
+
+  /**
+   * Parse default/inline value: string literal hoặc text không dấu nháy.
+   */
+  private parseValueToken(token: string): string {
+    const trimmed = token.trim();
+    const quoted = /^(['"])([\s\S]*)\1$/.exec(trimmed);
+    if (quoted) {
+      return quoted[2];
+    }
+    return trimmed;
+  }
+
+  /**
+   * Parse tên template cho @extends (chấp nhận cả unquoted).
    */
   private parseStringLiteral(value: string, directive: string, location: BladeSourceLocation): string {
-    const trimmed = value.trim();
-    const match = /^(['"])([^'"]*)\1$/.exec(trimmed);
-    if (!match) {
+    const name = this.parseNameToken(value);
+    if (name === null) {
       throw this.error(
         "BLADE_INVALID_DIRECTIVE_SYNTAX",
-        `@${directive} expects a string literal (e.g. 'layouts.app')`,
+        `@${directive} expects a template name (e.g. 'layouts.app' or layouts.app)`,
         location
       );
     }
-    return match[2];
+    return name;
   }
 
   private parseSectionHeader(
     args: string,
     location: BladeSourceLocation
   ): { name: string; inlineValue: string | null } {
-    const trimmed = args.trim();
-    const namedWithValue = /^(['"])([^'"]+)\1\s*,\s*(['"])([^'"]*)\3\s*$/.exec(trimmed);
-    if (namedWithValue) {
-      return { name: namedWithValue[2], inlineValue: namedWithValue[4] };
-    }
-    const namedOnly = /^(['"])([^'"]+)\1\s*$/.exec(trimmed);
-    if (namedOnly) {
-      return { name: namedOnly[2], inlineValue: null };
+    const parts = splitTopLevelComma(args);
+    if (parts.length === 1) {
+      const name = this.parseNameToken(parts[0]);
+      if (name !== null) {
+        return { name, inlineValue: null };
+      }
+    } else if (parts.length === 2) {
+      const name = this.parseNameToken(parts[0]);
+      if (name !== null) {
+        return { name, inlineValue: this.parseValueToken(parts[1]) };
+      }
     }
     throw this.error(
       "BLADE_INVALID_SECTION_ARGS",
@@ -543,14 +603,17 @@ export class BladeParser {
     args: string,
     location: BladeSourceLocation
   ): { name: string; defaultValue?: string } {
-    const trimmed = args.trim();
-    const withDefault = /^(['"])([^'"]+)\1\s*,\s*(['"])([^'"]*)\3\s*$/.exec(trimmed);
-    if (withDefault) {
-      return { name: withDefault[2], defaultValue: withDefault[4] };
-    }
-    const only = /^(['"])([^'"]+)\1\s*$/.exec(trimmed);
-    if (only) {
-      return { name: only[2] };
+    const parts = splitTopLevelComma(args);
+    if (parts.length === 1) {
+      const name = this.parseNameToken(parts[0]);
+      if (name !== null) {
+        return { name };
+      }
+    } else if (parts.length === 2) {
+      const name = this.parseNameToken(parts[0]);
+      if (name !== null) {
+        return { name, defaultValue: this.parseValueToken(parts[1]) };
+      }
     }
     throw this.error(
       "BLADE_INVALID_YIELD_ARGS",
@@ -563,14 +626,18 @@ export class BladeParser {
     args: string,
     location: BladeSourceLocation
   ): { partial: string; dataExpression?: string } {
-    const trimmed = args.trim();
-    const withData = /^(['"])([^'"]+)\1\s*,\s*(\{[\s\S]*\})\s*$/.exec(trimmed);
-    if (withData) {
-      return { partial: withData[2], dataExpression: withData[3] };
-    }
-    const only = /^(['"])([^'"]+)\1\s*$/.exec(trimmed);
-    if (only) {
-      return { partial: only[2] };
+    const parts = splitTopLevelComma(args);
+    if (parts.length === 1) {
+      const partial = this.parseNameToken(parts[0]);
+      if (partial !== null) {
+        return { partial };
+      }
+    } else if (parts.length === 2) {
+      const partial = this.parseNameToken(parts[0]);
+      const data = parts[1].trim();
+      if (partial !== null && /^\{[\s\S]*\}$/.test(data)) {
+        return { partial, dataExpression: data };
+      }
     }
     throw this.error(
       "BLADE_INVALID_INCLUDE_ARGS",
@@ -631,4 +698,66 @@ export class BladeParser {
       templatePath: this.templatePath,
     });
   }
+}
+
+/**
+ * Tách args theo dấu phẩy ở cấp cao nhất (bỏ qua phẩy trong string
+ * literal hoặc trong ngoặc `()`/`{}`/`[]`).
+ */
+function splitTopLevelComma(args: string): string[] {
+  const trimmed = args.trim();
+  if (trimmed.length === 0) return [];
+
+  const parts: string[] = [];
+  let depth = 0;
+  let stringQuote: string | null = null;
+  let current = "";
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+
+    if (stringQuote !== null) {
+      current += ch;
+      if (ch === "\\") {
+        if (i + 1 < trimmed.length) {
+          current += trimmed[i + 1];
+          i++;
+        }
+        continue;
+      }
+      if (ch === stringQuote) stringQuote = null;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      stringQuote = ch;
+      current += ch;
+      continue;
+    }
+
+    if (ch === "(" || ch === "{" || ch === "[") {
+      depth++;
+      current += ch;
+      continue;
+    }
+    if (ch === ")" || ch === "}" || ch === "]") {
+      depth--;
+      current += ch;
+      continue;
+    }
+
+    if (ch === "," && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current.trim().length > 0 || parts.length > 0) {
+    parts.push(current.trim());
+  }
+
+  return parts;
 }

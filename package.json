@@ -1,16 +1,18 @@
 {
   "name": "leaf-blade",
-  "version": "0.0.4",
-  "description": "Blade template engine for Leaf framework - Laravel Blade-like syntax for JavaScript/TypeScript",
+  "version": "1.0.0",
+  "description": "Blade template engine for Leaf framework - Laravel Blade-like syntax with native AST runtime (zero EJS dependency)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
     "README.md",
+    "README.vi.md",
+    "MIGRATION.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --external ejs --external html-minifier-terser --external elysia && bun run build:types",
+    "build": "bun build src/index.ts --outdir dist --target node --external html-minifier-terser --external elysia && bun run build:types",
     "build:types": "tsc -p tsconfig.build.json",
     "dev": "bun run src/index.ts",
     "test": "bun test",
@@ -43,7 +45,6 @@
   "homepage": "https://github.com/theanh-it/leaf-blade#readme",
   "type": "module",
   "dependencies": {
-    "ejs": "^3.1.10",
     "elysia": "^1.4.16",
     "html-minifier-terser": "^7.2.0"
   },
@@ -52,6 +53,7 @@
     "@types/html-minifier-terser": "^7.0.2",
     "@types/node": "^24.0.1",
     "bun-types": "latest",
+    "ejs": "^3.1.10",
     "typescript": "^5.8.3"
   },
   "peerDependencies": {

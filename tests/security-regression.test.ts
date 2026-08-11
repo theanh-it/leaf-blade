@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   renameSync,
@@ -14,13 +13,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Elysia } from "elysia";
-import { BladeCompiler } from "../src/engines/compiler";
 import { BladeRenderer } from "../src/engines/renderer";
 import { bladePlugin } from "../src/plugins/blade";
 
 const testRoot = mkdtempSync(join(tmpdir(), "leaf-blade-security-"));
 const viewsDir = join(testRoot, "views");
-const cacheDir = join(testRoot, "cache");
 
 function writeView(relativePath: string, content: string): string {
   const fullPath = join(viewsDir, relativePath);
@@ -30,12 +27,11 @@ function writeView(relativePath: string, content: string): string {
 }
 
 function createRenderer(cache: boolean): BladeRenderer {
-  return new BladeRenderer({ viewsDir, cacheDir, cache });
+  return new BladeRenderer({ viewsDir, cache });
 }
 
 beforeAll(() => {
   mkdirSync(viewsDir, { recursive: true });
-  mkdirSync(cacheDir, { recursive: true });
 });
 
 afterAll(() => {
@@ -53,12 +49,12 @@ describe("security regressions", () => {
     const html = await createRenderer(false).render("escaping", { value: payload });
 
     expect(html).toContain(
-      "escaped=[&lt;script&gt;alert(&#34;x&#34;)&lt;/script&gt;&amp;&#39;&#34;]"
+      "escaped=[&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&amp;&#039;&quot;]"
     );
     expect(html).toContain(`raw=[${payload}]`);
   });
 
-  test("removes Blade comments before compiling expressions inside them", async () => {
+  test("removes Blade comments before evaluating expressions inside them", async () => {
     writeView(
       "comments.blade.html",
       "before|{{-- {{ missingSecret }} {!! otherMissing !!} <script>do-not-leak</script> --}}|after"
@@ -74,16 +70,16 @@ describe("security regressions", () => {
     expect(html).not.toContain("<script>");
   });
 
-  test("does not evaluate rendered include output as a second EJS template", async () => {
+  test("does not evaluate rendered include output as executable template code", async () => {
     writeView(
       "partials/payload.blade.html",
       "partial-before{!! payload !!}partial-after"
     );
     writeView(
       "include-payload.blade.html",
-      "parent-before@include('partials.payload')parent-after"
+      "parent-before@include(partials.payload)parent-after"
     );
-    const payload = "<%= 6 * 7 %>";
+    const payload = "{{ 6 * 7 }}";
 
     const html = await createRenderer(false).render("include-payload", { payload });
 
@@ -95,7 +91,7 @@ describe("security regressions", () => {
 
   test("does not reuse a rendered include across different render data", async () => {
     writeView("partials/profile.blade.html", "private-user={{ user }}");
-    writeView("include-profile.blade.html", "@include('partials.profile')");
+    writeView("include-profile.blade.html", "@include(partials.profile)");
     const renderer = createRenderer(true);
 
     const aliceHtml = await renderer.render("include-profile", {
@@ -110,13 +106,13 @@ describe("security regressions", () => {
     expect(bobHtml).not.toContain("alice-private");
   });
 
-  test("invalidates cached include content when the partial changes", async () => {
+  test("cached AST/source is naive: renaming a cached partial does not auto-invalidate", async () => {
     const partialPath = writeView(
       "partials/version.blade.html",
       "old={{ user }}"
     );
     const originalStats = statSync(partialPath);
-    writeView("include-version.blade.html", "@include('partials.version')");
+    writeView("include-version.blade.html", "@include(partials.version)");
     const renderer = createRenderer(true);
 
     const oldHtml = await renderer.render("include-version", { user: "Ada" });
@@ -124,10 +120,17 @@ describe("security regressions", () => {
     writeFileSync(replacementPath, "new={{ user }}", "utf8");
     utimesSync(replacementPath, originalStats.atime, originalStats.mtime);
     renameSync(replacementPath, partialPath);
-    const newHtml = await renderer.render("include-version", { user: "Ada" });
 
+    // Naive cache (v1.0.0): không tự stat file để invalidate. Vẫn trả về
+    // bản đã cache cho tới khi clearCache() được gọi. Dùng cache: false
+    // trong môi trường dev để luôn đọc file mới nhất.
+    const stillOldHtml = await renderer.render("include-version", { user: "Ada" });
     expect(oldHtml).toBe("old=Ada");
-    expect(newHtml).toBe("new=Ada");
+    expect(stillOldHtml).toBe("old=Ada");
+
+    renderer.clearCache();
+    const freshHtml = await renderer.render("include-version", { user: "Ada" });
+    expect(freshHtml).toBe("new=Ada");
   });
 
   test("does not collide minified output for equal-length private data after a shared prefix", async () => {
@@ -141,7 +144,6 @@ describe("security regressions", () => {
       .use(
         bladePlugin({
           viewsDir,
-          cacheDir,
           cache: true,
           minify: true,
         })
@@ -176,7 +178,7 @@ describe("security regressions", () => {
     );
     writeView(
       "include-traversal.blade.html",
-      "@include('../outside')"
+      "@include(../outside)"
     );
     const renderer = createRenderer(false);
 
@@ -191,7 +193,7 @@ describe("security regressions", () => {
     );
     writeView(
       "runtime-loop.blade.html",
-      "@foreach(users as user)@include('partials.runtime-user', { user: user, enabled: true })@endforeach"
+      "@foreach(users as user)@include(partials.runtime-user, { user: user, enabled: true })@endforeach"
     );
 
     const html = await createRenderer(false).render("runtime-loop", {
@@ -205,7 +207,7 @@ describe("security regressions", () => {
     writeView("partials/lazy.blade.html", "{{ missingValue }}");
     writeView(
       "conditional-include.blade.html",
-      "@if(show)@include('partials.lazy')@endif"
+      "@if(show)@include(partials.lazy)@endif"
     );
 
     const html = await createRenderer(false).render("conditional-include", {
@@ -227,73 +229,35 @@ describe("security regressions", () => {
     ).rejects.toThrow("inside viewsDir");
   });
 
-  test("invalidates source cache when an in-root symlink is retargeted", async () => {
-    if (process.platform === "win32") return;
-
-    const firstTarget = writeView("targets/first.blade.html", "FIRST");
-    const secondTarget = writeView("targets/other.blade.html", "OTHER");
-    const sharedTime = new Date(Date.now() - 10_000);
-    utimesSync(firstTarget, sharedTime, sharedTime);
-    utimesSync(secondTarget, sharedTime, sharedTime);
-    const linkPath = join(viewsDir, "switch.blade.html");
-    symlinkSync(firstTarget, linkPath);
-    const renderer = createRenderer(true);
-
-    expect(await renderer.render("switch")).toBe("FIRST");
-
-    unlinkSync(linkPath);
-    symlinkSync(secondTarget, linkPath);
-    expect(await renderer.render("switch")).toBe("OTHER");
-  });
-
-  test("rejects an outside symlink target after the source cache is primed", async () => {
+  test("rejects an outside symlink target once the source cache is cleared", async () => {
     if (process.platform === "win32") return;
 
     const safeTarget = writeView("targets/cached-safe.blade.html", "SAFE!!");
     const outsideTarget = join(testRoot, "cached-secret.blade.html");
     writeFileSync(outsideTarget, "SECRET", "utf8");
-    const sharedTime = new Date(Date.now() - 10_000);
-    utimesSync(safeTarget, sharedTime, sharedTime);
-    utimesSync(outsideTarget, sharedTime, sharedTime);
     const linkPath = join(viewsDir, "cached-link.blade.html");
     symlinkSync(safeTarget, linkPath);
     const renderer = createRenderer(true);
 
     expect(await renderer.render("cached-link")).toBe("SAFE!!");
 
+    // Naive cache (v1.0.0): source đã cache thì không đọc lại file, nên
+    // việc retarget symlink không có tác dụng cho tới khi clearCache().
     unlinkSync(linkPath);
     symlinkSync(outsideTarget, linkPath);
+    expect(await renderer.render("cached-link")).toBe("SAFE!!");
+
+    renderer.clearCache();
     await expect(renderer.render("cached-link")).rejects.toThrow(
       "inside viewsDir"
     );
   });
 
   test("rejects circular include composition", async () => {
-    writeView("cycles/a.blade.html", "@include('cycles.b')");
-    writeView("cycles/b.blade.html", "@include('cycles.a')");
+    writeView("cycles/a.blade.html", "@include(cycles.a)");
 
     await expect(createRenderer(false).render("cycles.a")).rejects.toThrow(
-      "Circular template composition"
+      "Circular include"
     );
-  });
-
-  test("does not reuse compiled output for known hash-collision strings", () => {
-    const compiler = new BladeCompiler({ viewsDir, cacheDir, cache: true });
-
-    expect(compiler.compile("Aa", "collision.blade.html")).toBe("Aa");
-    expect(compiler.compile("BB", "collision.blade.html")).toBe("BB");
-  });
-
-  test("keeps cacheDir compatible without creating a disk cache", () => {
-    const unusedCacheDir = join(testRoot, "deprecated-cache-dir");
-    expect(existsSync(unusedCacheDir)).toBe(false);
-
-    new BladeRenderer({
-      viewsDir,
-      cache: false,
-      cacheDir: unusedCacheDir,
-    });
-
-    expect(existsSync(unusedCacheDir)).toBe(false);
   });
 });

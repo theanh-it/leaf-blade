@@ -1,13 +1,12 @@
 /**
  * Public entry point cho parser module.
  *
- * Hiện tại module parser chạy song song với compiler cũ.
- * Renderer cũ (`BladeRenderer`) vẫn dùng `BladeCompiler` cũ, nhưng
- * người dùng có thể chọn dùng `BladeCompilerV2` thông qua API export này.
+ * `BladeCompiler.parse()` là API chính, được `BladeRenderer` dùng để lấy
+ * AST và evaluate trực tiếp qua native runtime (không qua EJS).
  */
 export {
-  BladeCompilerV2,
-  type BladeCompileOptionsV2,
+  BladeCompiler,
+  type BladeCompileOptions,
 } from "./compiler.js";
 
 export { BladeLexer, type BladeToken, type BladeTokenType, type LexerOptions } from "./lexer.js";

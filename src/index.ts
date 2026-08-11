@@ -13,15 +13,31 @@ export {
   type BladeContextExtensions,
 } from "./plugins/blade.js";
 
-// Export engines
-export { BladeCompiler } from "./engines/compiler.js";
-export { BladeRenderer } from "./engines/renderer.js";
-export { SimpleRenderer } from "./engines/simple-renderer.js";
-
-// Export parser module (v2)
+// Export main renderer (native runtime, không phụ thuộc EJS)
 export {
-  BladeCompilerV2,
-  type BladeCompileOptionsV2,
+  BladeRenderer,
+  type BladeRendererOptions,
+} from "./engines/renderer.js";
+
+// Export runtime internals (dùng khi cần custom expression evaluation,
+// custom layout composer, hoặc test)
+export {
+  BladeRuntime,
+  RuntimeContext,
+  ExpressionEvaluator,
+  TemplateComposer,
+  IncludeProcessor,
+  type RuntimeOptions,
+  type EvaluatorOptions,
+  type ComposerOptions,
+  type TemplateLoader,
+  type IncludeProcessorOptions
+} from "./engines/runtime/index.js";
+
+// Export parser module
+export {
+  BladeCompiler,
+  type BladeCompileOptions,
   BladeLexer,
   type BladeToken,
   type BladeTokenType,
