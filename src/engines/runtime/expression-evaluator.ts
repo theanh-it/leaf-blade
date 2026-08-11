@@ -3,24 +3,42 @@
  * 
  * Safe evaluation của JavaScript expressions trong template context.
  * Security-first design với sandboxing và whitelist approach.
+ * Performance-optimized với expression caching và fast-path.
  */
 
 export interface EvaluatorOptions {
-  /**
-   * Allow access to these globals
-   * @default ['Math', 'Date', 'JSON', 'String', 'Number', 'Boolean', 'Array', 'Object']
-   */
   allowedGlobals?: string[];
-
-  /**
-   * Enable strict mode evaluation
-   * @default true
-   */
-  strictMode?: boolean;
 }
+
+// Simple property access pattern: `name`, `user.name`, `a.b.c`
+const SIMPLE_PROPERTY_REGEX = /^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*$/;
+// Optional chaining pattern: `user?.name`, `a?.b?.c`
+const OPTIONAL_CHAIN_REGEX = /^[a-zA-Z_$][\w$]*(?:\?\.?[a-zA-Z_$][\w$]*)*$/;
+// JavaScript literals that should NOT go through fast-path
+const LITERAL_KEYWORDS = new Set(['true', 'false', 'null', 'undefined', 'NaN', 'Infinity']);
 
 export class ExpressionEvaluator {
   private allowedGlobals: Set<string>;
+  private expressionCache = new Map<string, (scope: any) => any>();
+  private statementCache = new Map<string, (scope: any) => any>();
+  private safeGlobals: Record<string, any>;
+
+  // Pre-compiled dangerous patterns for validation
+  private static readonly DANGEROUS_PATTERNS = [
+    /\beval\s*\(/i,
+    /\bFunction\s*\(/i,
+    /\bsetTimeout\s*\(/i,
+    /\bsetInterval\s*\(/i,
+    /\bexecScript\s*\(/i,
+    /\b__proto__\b/,
+    /\bconstructor\s*\[/,
+    /\bprocess\s*\./,
+    /\brequire\s*\(/,
+    /\bimport\s*\(/,
+    /\bglobal\s*\./,
+    /\bwindow\s*\./,
+    /\bdocument\s*\./,
+  ] as const;
 
   constructor(options: EvaluatorOptions = {}) {
     this.allowedGlobals = new Set(
@@ -33,31 +51,95 @@ export class ExpressionEvaluator {
         'Boolean',
         'Array',
         'Object',
-        'console', // For debugging
+        'console',
       ]
     );
-    // options.strictMode reserved (evaluator dùng `with`, không thể strict).
-    void options.strictMode;
+    this.safeGlobals = this.buildSafeGlobals();
   }
 
   /**
-   * Evaluate expression và return value
-   *
-   * Sử dụng `with(scope)` + Proxy để:
-   *  - Bare identifier (name, user, ...) resolve từ context.
-   *  - Biến không tồn tại → `undefined` (không throw ReferenceError),
-   *    hỗ trợ optional chaining `user?.name` khi `user` chưa được định nghĩa.
+   * Fast-path evaluator: bypasses Proxy overhead for simple property access.
+   * Handles: `name`, `user.name`, `user?.name`, `a.b.c`
    */
   evaluate(expression: string, context: Record<string, any>): any {
-    if (!expression || expression.trim() === '') {
+    if (!expression || (expression = expression.trim()) === '') {
       return undefined;
     }
 
-    // Security check
+    // Fast-path: simple property access (very common in templates)
+    // Skip Proxy overhead for expressions like `name`, `user.name`, `item.price`
+    const fastResult = this.evaluateSimple(expression, context);
+    if (fastResult !== ExpressionEvaluator.FAST_PATH_MISS) {
+      return fastResult;
+    }
+
+    // Slow path: full evaluation with Proxy
+    return this.evaluateWithProxy(expression, context);
+  }
+
+  /**
+   * Fast-path evaluation for simple property chains.
+   * Handles: `name`, `user.name`, `user?.name`, `a.b?.c`
+   */
+  private evaluateSimple(expr: string, context: Record<string, any>): any {
+    // Must start with identifier character (not a literal like 'true', 'null', '123')
+    if (!/^[a-zA-Z_$]/.test(expr)) {
+      return ExpressionEvaluator.FAST_PATH_MISS;
+    }
+
+    // Block literal keywords - these need Proxy evaluation
+    if (LITERAL_KEYWORDS.has(expr)) {
+      return ExpressionEvaluator.FAST_PATH_MISS;
+    }
+
+    // Check if it's a safe property chain
+    if (!SIMPLE_PROPERTY_REGEX.test(expr) && !OPTIONAL_CHAIN_REGEX.test(expr)) {
+      return ExpressionEvaluator.FAST_PATH_MISS;
+    }
+
+    // Security: block dangerous property access
+    if (expr.includes('__proto__') || expr.includes('constructor') || 
+        expr.includes('prototype')) {
+      return ExpressionEvaluator.FAST_PATH_MISS;
+    }
+
+    const parts = expr.split('.');
+    let current: any = context;
+    let pendingOptional = false;
+
+    for (const part of parts) {
+      if (pendingOptional && current == null) return undefined;
+      
+      const hasTrailingOptional = part[part.length - 1] === '?';
+      const key = hasTrailingOptional ? part.slice(0, -1) : part;
+      
+      if (hasTrailingOptional) {
+        pendingOptional = true;
+        current = current?.[key];
+      } else {
+        current = current?.[key];
+        pendingOptional = false;
+      }
+    }
+
+    return current;
+  }
+  private static readonly FAST_PATH_MISS = Symbol('FAST_PATH_MISS');
+
+  /**
+   * Slow-path: full evaluation with Proxy (for complex expressions).
+   * Security validation only done here, not for cached expressions.
+   */
+  private evaluateWithProxy(expression: string, context: Record<string, any>): any {
+    // Security check (only for non-cached)
     this.validateExpression(expression);
 
-    // Compile (có thể throw "Invalid expression syntax")
-    const func = this.compile(expression, /* isStatement */ false);
+    // Get or compile function (cached!)
+    let func = this.expressionCache.get(expression);
+    if (!func) {
+      func = this.compile(expression, false);
+      this.cacheWithLimit(this.expressionCache, expression, func, 5000);
+    }
 
     try {
       const scope = this.makeScope(context);
@@ -73,18 +155,19 @@ export class ExpressionEvaluator {
   /**
    * Execute statement (không return value)
    * Dùng cho @js blocks và @for init/increment.
-   *
-   * Assignment tới biến trong context được ghi ngược lại context object
-   * thông qua Proxy `set` trap, nên mutation được giữ lại giữa các lần gọi.
    */
   execute(statement: string, context: Record<string, any>): void {
-    if (!statement || statement.trim() === '') {
+    if (!statement || (statement = statement.trim()) === '') {
       return;
     }
 
     this.validateExpression(statement);
 
-    const func = this.compile(statement, /* isStatement */ true);
+    let func = this.statementCache.get(statement);
+    if (!func) {
+      func = this.compile(statement, true);
+      this.cacheWithLimit(this.statementCache, statement, func, 5000);
+    }
 
     try {
       const scope = this.makeScope(context);
@@ -98,8 +181,19 @@ export class ExpressionEvaluator {
   }
 
   /**
+   * Helper: Cache with size limit
+   */
+  private cacheWithLimit(cache: Map<string, any>, key: string, value: any, limit: number): void {
+    if (cache.size >= limit) {
+      const firstKey = cache.keys().next().value;
+      if (firstKey) cache.delete(firstKey);
+    }
+    cache.set(key, value);
+  }
+
+  /**
    * Compile expression/statement thành function nhận `__scope__`.
-   * Dùng `with` để identifier resolve qua Proxy scope.
+   * Validation đã được gọi trước khi vào đây.
    */
   private compile(code: string, isStatement: boolean): (scope: any) => any {
     const body = isStatement
@@ -107,7 +201,6 @@ export class ExpressionEvaluator {
       : `with (__scope__) {\nreturn (${code});\n}`;
 
     try {
-      // Không dùng "use strict" vì cần `with`.
       return new Function('__scope__', body) as (scope: any) => any;
     } catch (error) {
       throw new Error(
@@ -126,8 +219,6 @@ export class ExpressionEvaluator {
    *  - `set` ghi vào context (own property).
    */
   private makeScope(context: Record<string, any>): any {
-    const globals = this.buildSafeGlobals();
-
     return new Proxy(context, {
       has(): boolean {
         return true;
@@ -140,8 +231,9 @@ export class ExpressionEvaluator {
           if (key in target) {
             return (target as any)[key];
           }
-          if (Object.prototype.hasOwnProperty.call(globals, key)) {
-            return globals[key];
+          // Use pre-built safe globals
+          if (Object.prototype.hasOwnProperty.call(this.safeGlobals, key)) {
+            return this.safeGlobals[key];
           }
           return undefined;
         }
@@ -155,12 +247,11 @@ export class ExpressionEvaluator {
   }
 
   /**
-   * Build safe global objects
+   * Build safe global objects - computed once in constructor
    */
   private buildSafeGlobals(): Record<string, any> {
     const globals: Record<string, any> = {};
 
-    // Only include whitelisted globals
     if (this.allowedGlobals.has('Math')) globals.Math = Math;
     if (this.allowedGlobals.has('Date')) globals.Date = Date;
     if (this.allowedGlobals.has('JSON')) globals.JSON = JSON;
@@ -178,24 +269,7 @@ export class ExpressionEvaluator {
    * Validate expression for security
    */
   private validateExpression(expression: string): void {
-    // Check for dangerous patterns
-    const dangerousPatterns = [
-      /\beval\s*\(/i,
-      /\bFunction\s*\(/i,
-      /\bsetTimeout\s*\(/i,
-      /\bsetInterval\s*\(/i,
-      /\bexecScript\s*\(/i,
-      /\b__proto__\b/,
-      /\bconstructor\s*\[/,
-      /\bprocess\s*\./,
-      /\brequire\s*\(/,
-      /\bimport\s*\(/,
-      /\bglobal\s*\./,
-      /\bwindow\s*\./,
-      /\bdocument\s*\./,
-    ];
-
-    for (const pattern of dangerousPatterns) {
+    for (const pattern of ExpressionEvaluator.DANGEROUS_PATTERNS) {
       if (pattern.test(expression)) {
         throw new Error(
           `Expression contains dangerous pattern: ${pattern.source}\n` +
