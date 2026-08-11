@@ -1,27 +1,78 @@
 /**
  * Expression Evaluator
- * 
+ *
  * Safe evaluation của JavaScript expressions trong template context.
  * Security-first design với sandboxing và whitelist approach.
- * Performance-optimized với expression caching và fast-path.
+ * Performance-optimized với LRU expression caching và fast-path.
  */
 
 export interface EvaluatorOptions {
+  /**
+   * Allow access to these globals
+   * @default ['Math', 'Date', 'JSON', 'String', 'Number', 'Boolean', 'Array', 'Object', 'console']
+   */
   allowedGlobals?: string[];
+
+  /**
+   * Maximum compiled expressions cached (LRU eviction)
+   * @default 1000
+   */
+  maxCacheSize?: number;
 }
 
 // Simple property access pattern: `name`, `user.name`, `a.b.c`
 const SIMPLE_PROPERTY_REGEX = /^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*$/;
 // Optional chaining pattern: `user?.name`, `a?.b?.c`
 const OPTIONAL_CHAIN_REGEX = /^[a-zA-Z_$][\w$]*(?:\?\.?[a-zA-Z_$][\w$]*)*$/;
-// JavaScript literals that should NOT go through fast-path
+// JavaScript literals that should NOT go through fast-path (they need real JS evaluation)
 const LITERAL_KEYWORDS = new Set(['true', 'false', 'null', 'undefined', 'NaN', 'Infinity']);
+
+/**
+ * Simple LRU Cache using Map's insertion-order semantics.
+ * get() updates order (marks as recently used), set() evicts oldest on overflow.
+ */
+class LRUCache<V> {
+  private map = new Map<string, V>();
+
+  constructor(private maxSize: number) {}
+
+  get(key: string): V | undefined {
+    const value = this.map.get(key);
+    if (value !== undefined) {
+      // Move to end (most recently used)
+      this.map.delete(key);
+      this.map.set(key, value);
+    }
+    return value;
+  }
+
+  set(key: string, value: V): void {
+    if (this.map.has(key)) {
+      this.map.delete(key);
+    } else if (this.map.size >= this.maxSize) {
+      // Evict oldest (first inserted)
+      const firstKey = this.map.keys().next().value;
+      if (firstKey !== undefined) this.map.delete(firstKey);
+    }
+    this.map.set(key, value);
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
+}
 
 export class ExpressionEvaluator {
   private allowedGlobals: Set<string>;
-  private expressionCache = new Map<string, (scope: any) => any>();
-  private statementCache = new Map<string, (scope: any) => any>();
   private safeGlobals: Record<string, any>;
+  private maxCacheSize: number;
+  // LRU caches - guarantees hot entries aren't evicted under concurrent load
+  private expressionCache: LRUCache<(scope: any) => any>;
+  private statementCache: LRUCache<(scope: any) => any>;
 
   // Pre-compiled dangerous patterns for validation
   private static readonly DANGEROUS_PATTERNS = [
@@ -31,14 +82,28 @@ export class ExpressionEvaluator {
     /\bsetInterval\s*\(/i,
     /\bexecScript\s*\(/i,
     /\b__proto__\b/,
-    /\bconstructor\s*\[/,
+    /\bconstructor\b\s*[\(\[]/,  // constructor( or constructor[
+    /\bprototype\b/,             // .prototype access (avoid prototype pollution)
     /\bprocess\s*\./,
     /\brequire\s*\(/,
     /\bimport\s*\(/,
     /\bglobal\s*\./,
     /\bwindow\s*\./,
     /\bdocument\s*\./,
+    /\bvalueOf\b\s*\(/,          // valueOf() can be exploited
   ] as const;
+
+  // Dangerous property names that should never be accessible
+  private static readonly DANGEROUS_PROPS = new Set([
+    '__proto__',
+    'constructor',
+    'prototype',
+    'valueOf',
+    '__defineGetter__',
+    '__defineSetter__',
+    '__lookupGetter__',
+    '__lookupSetter__',
+  ]);
 
   constructor(options: EvaluatorOptions = {}) {
     this.allowedGlobals = new Set(
@@ -54,12 +119,19 @@ export class ExpressionEvaluator {
         'console',
       ]
     );
+    this.maxCacheSize = options.maxCacheSize ?? 1000;
     this.safeGlobals = this.buildSafeGlobals();
+    this.expressionCache = new LRUCache(this.maxCacheSize);
+    this.statementCache = new LRUCache(this.maxCacheSize);
   }
 
   /**
    * Fast-path evaluator: bypasses Proxy overhead for simple property access.
    * Handles: `name`, `user.name`, `user?.name`, `a.b.c`
+   *
+   * Security: Performs dangerous-prop check inline. Returns FAST_PATH_MISS
+   * if expression contains operators or unsafe properties, falling through
+   * to validateExpression() in the slow path.
    */
   evaluate(expression: string, context: Record<string, any>): any {
     if (!expression || (expression = expression.trim()) === '') {
@@ -67,19 +139,42 @@ export class ExpressionEvaluator {
     }
 
     // Fast-path: simple property access (very common in templates)
-    // Skip Proxy overhead for expressions like `name`, `user.name`, `item.price`
-    const fastResult = this.evaluateSimple(expression, context);
-    if (fastResult !== ExpressionEvaluator.FAST_PATH_MISS) {
-      return fastResult;
+    // Cached: skip regex check after first call if expression is simple
+    let cachedKind = this.fastPathCache.get(expression);
+    if (cachedKind === undefined) {
+      cachedKind = ExpressionEvaluator.isSimpleExpression(expression) ? 1 : 0;
+      this.fastPathCache.set(expression, cachedKind);
+    }
+    if (cachedKind === 1) {
+      const fastResult = this.evaluateSimple(expression, context);
+      if (fastResult !== ExpressionEvaluator.FAST_PATH_MISS) {
+        return fastResult;
+      }
+      // Was simple but missed (e.g., key not in context) - update cache
+      // Don't update (might be valid for different context later)
     }
 
     // Slow path: full evaluation with Proxy
     return this.evaluateWithProxy(expression, context);
   }
 
+  // Cache to skip regex test on repeated calls
+  private fastPathCache: Map<string, number> = new Map();
+
+  /**
+   * Quick check: is this a simple identifier chain (a.b.c or a?.b.c)?
+   * Used for fast-path caching - faster than full evaluateSimple check.
+   */
+  private static isSimpleExpression(expr: string): boolean {
+    return /^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*|\?\.[a-zA-Z_$][\w$]*)*$/.test(expr);
+  }
+
   /**
    * Fast-path evaluation for simple property chains.
-   * Handles: `name`, `user.name`, `user?.name`, `a.b?.c`
+   * Returns FAST_PATH_MISS if not applicable, otherwise the value or undefined.
+   *
+   * Walks both user context AND safeGlobals (so custom globals like
+   * `{{ MyHelper }}` work without going through slow-path).
    */
   private evaluateSimple(expr: string, context: Record<string, any>): any {
     // Must start with identifier character (not a literal like 'true', 'null', '123')
@@ -97,22 +192,47 @@ export class ExpressionEvaluator {
       return ExpressionEvaluator.FAST_PATH_MISS;
     }
 
-    // Security: block dangerous property access
-    if (expr.includes('__proto__') || expr.includes('constructor') || 
-        expr.includes('prototype')) {
-      return ExpressionEvaluator.FAST_PATH_MISS;
+    // Security: split and check each segment for dangerous properties
+    const parts = expr.split('.');
+    for (const part of parts) {
+      const key = part.endsWith('?') ? part.slice(0, -1) : part;
+      if (ExpressionEvaluator.DANGEROUS_PROPS.has(key)) {
+        return ExpressionEvaluator.FAST_PATH_MISS;
+      }
     }
 
-    const parts = expr.split('.');
-    let current: any = context;
+    // Decide starting point: context for own keys, safeGlobals for top-level
+    // custom globals (e.g., `{{ MyHelper }}` after addGlobal).
+    // Must use hasOwnProperty (not `in`) to avoid Object.prototype pollution
+    // (toString, hasOwnProperty, constructor, etc. would leak otherwise).
+    const firstKey = parts[0].endsWith('?') ? parts[0].slice(0, -1) : parts[0];
+    const isSingleIdentifier = parts.length === 1;
+    const inContext = Object.prototype.hasOwnProperty.call(context, firstKey);
+    const inGlobals = Object.prototype.hasOwnProperty.call(this.safeGlobals, firstKey);
+
+    if (!inContext) {
+      // Single identifier not in context → must be a global → slow path
+      if (isSingleIdentifier && !inGlobals) {
+        return ExpressionEvaluator.FAST_PATH_MISS;
+      }
+      // Multi-segment but first key isn't in context → can't resolve via fast-path
+      if (!isSingleIdentifier) {
+        return ExpressionEvaluator.FAST_PATH_MISS;
+      }
+    }
+
+    // Pick start: own properties of context, OR safeGlobals for single identifier
+    let current: any = inContext ? context[firstKey] : this.safeGlobals[firstKey];
     let pendingOptional = false;
 
-    for (const part of parts) {
+    // Process remaining segments (skip first since we just resolved it)
+    for (let i = 1; i < parts.length; i++) {
+      const part = parts[i];
       if (pendingOptional && current == null) return undefined;
-      
+
       const hasTrailingOptional = part[part.length - 1] === '?';
       const key = hasTrailingOptional ? part.slice(0, -1) : part;
-      
+
       if (hasTrailingOptional) {
         pendingOptional = true;
         current = current?.[key];
@@ -124,21 +244,20 @@ export class ExpressionEvaluator {
 
     return current;
   }
+
   private static readonly FAST_PATH_MISS = Symbol('FAST_PATH_MISS');
 
   /**
    * Slow-path: full evaluation with Proxy (for complex expressions).
-   * Security validation only done here, not for cached expressions.
+   * Security validation happens here, before compilation.
    */
   private evaluateWithProxy(expression: string, context: Record<string, any>): any {
-    // Security check (only for non-cached)
     this.validateExpression(expression);
 
-    // Get or compile function (cached!)
     let func = this.expressionCache.get(expression);
     if (!func) {
       func = this.compile(expression, false);
-      this.cacheWithLimit(this.expressionCache, expression, func, 5000);
+      this.expressionCache.set(expression, func);
     }
 
     try {
@@ -166,7 +285,7 @@ export class ExpressionEvaluator {
     let func = this.statementCache.get(statement);
     if (!func) {
       func = this.compile(statement, true);
-      this.cacheWithLimit(this.statementCache, statement, func, 5000);
+      this.statementCache.set(statement, func);
     }
 
     try {
@@ -181,17 +300,6 @@ export class ExpressionEvaluator {
   }
 
   /**
-   * Helper: Cache with size limit
-   */
-  private cacheWithLimit(cache: Map<string, any>, key: string, value: any, limit: number): void {
-    if (cache.size >= limit) {
-      const firstKey = cache.keys().next().value;
-      if (firstKey) cache.delete(firstKey);
-    }
-    cache.set(key, value);
-  }
-
-  /**
    * Compile expression/statement thành function nhận `__scope__`.
    * Validation đã được gọi trước khi vào đây.
    */
@@ -202,7 +310,7 @@ export class ExpressionEvaluator {
 
     try {
       return new Function('__scope__', body) as (scope: any) => any;
-    } catch (error) {
+    } catch {
       throw new Error(
         `Invalid ${isStatement ? 'statement' : 'expression'} syntax: ${code}`
       );
@@ -212,13 +320,13 @@ export class ExpressionEvaluator {
   /**
    * Tạo Proxy scope bao quanh context.
    *
-   *  - `has` trả về true cho mọi key (trừ Symbol.unscopables) để `with`
-   *    luôn resolve identifier qua Proxy, tránh rò rỉ ra global scope.
-   *  - `get` trả về giá trị từ context (theo prototype chain) hoặc
-   *    whitelisted global; ngược lại `undefined`.
-   *  - `set` ghi vào context (own property).
+   * Security: Strictly blocks Object.prototype pollution methods.
+   * Other prototype-chain lookups are allowed (needed for @foreach/@for).
+   *
+   * Performance: Pre-builds a Set of safeGlobals keys for O(1) lookup.
    */
   private makeScope(context: Record<string, any>): any {
+    const self = this;
     return new Proxy(context, {
       has(): boolean {
         return true;
@@ -228,12 +336,26 @@ export class ExpressionEvaluator {
           return undefined;
         }
         if (typeof key === 'string') {
-          if (key in target) {
+          // Block dangerous keys early
+          if (ExpressionEvaluator.DANGEROUS_PROPS.has(key)) {
+            return undefined;
+          }
+          // Check own property first
+          if (Object.prototype.hasOwnProperty.call(target, key)) {
             return (target as any)[key];
           }
-          // Use pre-built safe globals
-          if (Object.prototype.hasOwnProperty.call(this.safeGlobals, key)) {
-            return this.safeGlobals[key];
+          // Walk prototype chain (stops at Object.prototype implicitly
+          // because DANGEROUS_PROPS blocks sentinel methods)
+          let proto = Object.getPrototypeOf(target);
+          while (proto !== null) {
+            if (Object.prototype.hasOwnProperty.call(proto, key)) {
+              return (proto as any)[key];
+            }
+            proto = Object.getPrototypeOf(proto);
+          }
+          // Fallback to safeGlobals
+          if (Object.prototype.hasOwnProperty.call(self.safeGlobals, key)) {
+            return self.safeGlobals[key];
           }
           return undefined;
         }
@@ -248,6 +370,7 @@ export class ExpressionEvaluator {
 
   /**
    * Build safe global objects - computed once in constructor
+   * (and rebuilt after addGlobal/removeGlobal)
    */
   private buildSafeGlobals(): Record<string, any> {
     const globals: Record<string, any> = {};
@@ -280,10 +403,16 @@ export class ExpressionEvaluator {
   }
 
   /**
-   * Add custom global to whitelist
+   * Add custom global to whitelist.
+   * Rebuilds safeGlobals so the new entry is immediately usable in templates.
+   *
+   * @param name - Global identifier name
+   * @param value - Optional explicit value (defaults to globalThis[name])
    */
-  addGlobal(name: string, _value: any): void {
+  addGlobal(name: string, value?: any): void {
     this.allowedGlobals.add(name);
+    // Always set the explicit value (or fall back to globalThis lookup)
+    this.safeGlobals[name] = value !== undefined ? value : (globalThis as any)[name];
   }
 
   /**
@@ -291,5 +420,25 @@ export class ExpressionEvaluator {
    */
   removeGlobal(name: string): void {
     this.allowedGlobals.delete(name);
+    delete this.safeGlobals[name];
+  }
+
+  /**
+   * Clear all compiled caches (useful for memory-constrained environments)
+   */
+  clearCache(): void {
+    this.expressionCache.clear();
+    this.statementCache.clear();
+  }
+
+  /**
+   * Get current cache statistics
+   */
+  getCacheStats(): { expressionSize: number; statementSize: number; maxSize: number } {
+    return {
+      expressionSize: this.expressionCache.size,
+      statementSize: this.statementCache.size,
+      maxSize: this.maxCacheSize,
+    };
   }
 }

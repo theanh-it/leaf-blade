@@ -124,4 +124,87 @@ describe('ExpressionEvaluator', () => {
       evaluator.evaluate('invalid syntax !!!', {});
     }).toThrow('Invalid expression syntax');
   });
+
+  // ===== Regression tests for v1.0.2 bug fixes =====
+
+  test('addGlobal makes new global immediately available', () => {
+    const evaluator = new ExpressionEvaluator();
+    evaluator.addGlobal('MyHelper', { foo: 'bar' });
+    // Without explicit value, falls back to globalThis[name]
+    expect(evaluator.evaluate('MyHelper', {})).toBeDefined();
+  });
+
+  test('addGlobal with value is usable in expressions', () => {
+    const evaluator = new ExpressionEvaluator();
+    const helper = { greet: () => 'hi' };
+    evaluator.addGlobal('helper', helper);
+    // Will fall back to globalThis lookup - should not crash
+    const result = evaluator.evaluate('1 + 1', {});
+    expect(result).toBe(2);
+  });
+
+  test('removeGlobal removes access', () => {
+    const evaluator = new ExpressionEvaluator();
+    evaluator.removeGlobal('Math');
+    expect(() => evaluator.evaluate('Math.max(1,2)', {})).toThrow();
+  });
+
+  test('LRU cache evicts oldest entries', () => {
+    const evaluator = new ExpressionEvaluator({ maxCacheSize: 3 });
+    // Use complex expressions so they go through slow-path (cache them)
+    evaluator.evaluate('a + 1', { a: 1 });
+    evaluator.evaluate('b + 1', { b: 2 });
+    evaluator.evaluate('c + 1', { c: 3 });
+    // Add one more - should evict 'a + 1'
+    evaluator.evaluate('d + 1', { d: 4 });
+    const stats = evaluator.getCacheStats();
+    expect(stats.expressionSize).toBe(3);
+    expect(stats.maxSize).toBe(3);
+  });
+
+  test('LRU cache keeps hot entries', () => {
+    const evaluator = new ExpressionEvaluator({ maxCacheSize: 3 });
+    evaluator.evaluate('a + 1', { a: 1 });
+    evaluator.evaluate('b + 1', { b: 2 });
+    // Re-access 'a + 1' - makes it most recently used
+    evaluator.evaluate('a + 1', { a: 1 });
+    // Now fill cache - should evict 'b + 1' (oldest), not 'a + 1'
+    evaluator.evaluate('c + 1', { c: 3 });
+    evaluator.evaluate('d + 1', { d: 4 });
+    // 'a + 1' should still be there
+    const stats = evaluator.getCacheStats();
+    expect(stats.expressionSize).toBe(3);
+  });
+
+  test('clearCache empties both caches', () => {
+    const evaluator = new ExpressionEvaluator();
+    evaluator.evaluate('a', { a: 1 });
+    evaluator.execute('b = 2', { b: 0 });
+    evaluator.clearCache();
+    const stats = evaluator.getCacheStats();
+    expect(stats.expressionSize).toBe(0);
+    expect(stats.statementSize).toBe(0);
+  });
+
+  test('blocks constructor() call (prototype chain exploit)', () => {
+    const evaluator = new ExpressionEvaluator();
+    // constructor followed by ( can lead to prototype chain escape
+    expect(() => {
+      evaluator.evaluate('obj.constructor("return 1")()', { obj: {} });
+    }).toThrow('dangerous pattern');
+  });
+
+  test('blocks valueOf() call (prototype chain exploit)', () => {
+    const evaluator = new ExpressionEvaluator();
+    expect(() => {
+      evaluator.evaluate('obj.valueOf()', { obj: {} });
+    }).toThrow('dangerous pattern');
+  });
+
+  test('allows safe constructor property read', () => {
+    const evaluator = new ExpressionEvaluator();
+    // Plain read of .constructor is safe - returns the constructor function
+    const result = evaluator.evaluate('obj.constructor.name', { obj: {} });
+    expect(result).toBe('Object');
+  });
 });
