@@ -9,7 +9,7 @@ import { constants, type Stats } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { BladeCompiler } from "./parser/compiler.js";
-import { BladeRuntime, type RuntimeOptions } from "./runtime/runtime.js";
+import { type RuntimeOptions } from "./runtime/runtime.js";
 import { CompiledRuntime } from "./runtime/compiled-runtime.js";
 import { compileNodes, type Op } from "./runtime/codegen.js";
 import { TemplateComposer, type TemplateLoader } from "./runtime/composer.js";
@@ -45,7 +45,6 @@ export class BladeRenderer implements TemplateLoader {
   private viewsDir: string;
   private cache: boolean;
   private compiler: BladeCompiler;
-  private runtime: BladeRuntime;
   private compiledRuntime: CompiledRuntime;
   private composer: TemplateComposer;
   private includeProcessor: IncludeProcessor;
@@ -53,7 +52,7 @@ export class BladeRenderer implements TemplateLoader {
   // Caches (naive: giữ tới khi clearCache)
   private astCache = new Map<string, ASTNode[]>();
   private templateCache = new Map<string, string>();
-  // Codegen cache: compiled ops for fast execution (v1.0.4+)
+  // Codegen cache: compiled ops for fast execution (v1.0.1+)
   private opsCache = new Map<string, Op[]>();
 
   private realViewsDir?: string;
@@ -73,8 +72,7 @@ export class BladeRenderer implements TemplateLoader {
       compatibilityMode: false, // v1.0.0 không cần compatibility
     });
 
-    // Initialize runtime
-    this.runtime = new BladeRuntime(options.runtime);
+    // Initialize compiled runtime (replaces AST interpreter in v1.0.1+)
     this.compiledRuntime = new CompiledRuntime(options.runtime);
 
     // Initialize composer
