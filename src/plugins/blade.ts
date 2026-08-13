@@ -15,6 +15,11 @@ export interface BladeOptions {
   /** @deprecated Reserved for backward compatibility. Blade only uses in-memory caches. */
   cacheDir?: string;
   minify?: boolean;
+  /**
+   * Enable security features (dangerous prop blocking, sandboxing)
+   * @default true
+   */
+  security?: boolean;
 }
 
 export interface BladeContextExtensions {
@@ -56,10 +61,13 @@ export const bladePlugin = (options: BladeOptions = {}) => {
     throw new Error("bladePlugin: minify must be a boolean");
   }
 
-  // Create Blade renderer (v1.0.0: native runtime, không phụ thuộc EJS)
+  // Create Blade renderer
   const renderer = new BladeRenderer({
     viewsDir,
     cache,
+    runtime: {
+      security: options.security,
+    },
   });
 
   return (app: Elysia) => {
@@ -118,7 +126,16 @@ export async function bladeView(
   template: string,
   data: BladeViewData = {}
 ): Promise<Response> {
-  const vite = (ctx as BladeContext).vite || { main: "", css: "" };
+  const bladeCtx = ctx as BladeContext;
+  const vite = bladeCtx.vite || { main: "", css: "" };
+
+  // Check if blade plugin is registered
+  if (!bladeCtx.blade) {
+    throw new Error(
+      "bladeView: Blade plugin not registered. " +
+      "Make sure to .use(bladePlugin()) before using bladeView()."
+    );
+  }
 
   // Extract options từ data
   const {
@@ -129,7 +146,7 @@ export async function bladeView(
   } = data;
 
   // Render Blade template
-  const html = await (ctx as any).blade.render(template, {
+  const html = await bladeCtx.blade.render(template, {
     ...restData,
     // Page metadata
     title,

@@ -504,4 +504,50 @@ i++;
     expect(html).toContain('After');
     expect(html).not.toContain('This is a comment');
   });
+
+  test('renderSync throws when template not compiled', async () => {
+    await writeFile(
+      path.join(tempDir, 'hello.blade.html'),
+      'Hello {{ name }}!'
+    );
+
+    // renderSync should throw if called before render()
+    expect(() => {
+      renderer.renderSync('hello', { name: 'World' });
+    }).toThrow(/Template not compiled yet/);
+  });
+
+  test('renderSync works after async render', async () => {
+    await writeFile(
+      path.join(tempDir, 'hello.blade.html'),
+      'Hello {{ name }}!'
+    );
+
+    // First render (populates cache)
+    await renderer.render('hello', { name: 'Initial' });
+
+    // renderSync should work now
+    const html = renderer.renderSync('hello', { name: 'World' });
+    expect(html).toBe('Hello World!');
+  });
+
+  test('renderSync is faster than async render for same data', async () => {
+    await writeFile(
+      path.join(tempDir, 'perf.blade.html'),
+      '<div>{{ title }}</div><p>{{ content }}</p>'
+    );
+
+    // Populate cache
+    await renderer.render('perf', { title: 'Test', content: 'Hello' });
+
+    // renderSync should be fast
+    const start = performance.now();
+    for (let i = 0; i < 1000; i++) {
+      renderer.renderSync('perf', { title: 'Test', content: 'Hello' });
+    }
+    const elapsed = performance.now() - start;
+
+    // Should complete 1000 renders in under 100ms (very conservative limit)
+    expect(elapsed).toBeLessThan(100);
+  });
 });

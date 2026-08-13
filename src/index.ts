@@ -13,14 +13,20 @@ export {
   type BladeContextExtensions,
 } from "./plugins/blade.js";
 
-// Export main renderer (native runtime, không phụ thuộc EJS)
+// Export main renderer (native AST runtime)
 export {
   BladeRenderer,
   type BladeRendererOptions,
 } from "./engines/renderer.js";
 
-// Export runtime internals (dùng khi cần custom expression evaluation,
-// custom layout composer, hoặc test)
+// Export compiled renderer (fast path via generated functions)
+export {
+  CompiledBlade,
+  type CompiledBladeOptions,
+} from "./engines/compiled-blade.js";
+
+// Export runtime internals (for custom expression evaluation,
+// custom layout composer, or testing)
 export {
   BladeRuntime,
   RuntimeContext,

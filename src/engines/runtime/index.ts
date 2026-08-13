@@ -1,7 +1,7 @@
 /**
  * Blade Runtime Module
- * 
- * Native runtime interpreter thay thế EJS dependency.
+ *
+ * Native runtime interpreter.
  */
 
 export { BladeRuntime, type RuntimeOptions } from './runtime.js';

@@ -1,8 +1,9 @@
 /**
- * AST node cho Blade template.
+ * AST node for Blade templates.
  *
- * Parser sẽ chuyển đổi luồng token thành cây AST, có đầy đủ thông tin
- * vị trí để diagnostics và code generator có thể xuất EJS với line/column.
+ * The parser converts the token stream into an AST tree that carries
+ * full position information for diagnostics, and that the code generator
+ * can serialize with line/column metadata.
  */
 import type { BladeSourceLocation } from "./diagnostics.js";
 

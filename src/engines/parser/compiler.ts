@@ -1,12 +1,13 @@
 /**
- * Compiler dùng pipeline lexer → parser → codegen.
+ * Compiler using the lexer → parser → codegen pipeline.
  *
- * `parse()` là API chính, được `BladeRenderer` (native runtime) dùng để
- * lấy AST rồi evaluate trực tiếp (không qua EJS).
+ * `parse()` is the main API, used by `BladeRenderer` (native runtime) to
+ * obtain the AST and evaluate it directly.
  *
- * `compile()`/`compilePure()` sinh ra EJS source string (giữ lại cho ai
- * muốn tái sử dụng pipeline lexer/parser/codegen độc lập với runtime,
- * ví dụ debug hoặc tooling khác); `BladeRenderer` không dùng các method này.
+ * `compile()` / `compilePure()` produce an EJS source string (kept for
+ * users who want to reuse the lexer/parser/codegen pipeline independently
+ * of the runtime — for example for debugging or external tooling);
+ * `BladeRenderer` does not use these methods.
  */
 import { createHash } from "node:crypto";
 import { BladeLexer } from "./lexer.js";
@@ -19,11 +20,6 @@ export interface BladeCompileOptions {
   /** @deprecated Reserved for backward compatibility. */
   cacheDir?: string;
   cache?: boolean;
-  /**
-   * Khi `true` (mặc định), `compile()` sinh thêm marker `BLADE_*` bên cạnh
-   * EJS cho layout/section/yield/include. `BladeRenderer` không dùng
-   * `compile()`/marker này — chỉ ảnh hưởng khi gọi trực tiếp compiler này.
-   */
   compatibilityMode?: boolean;
 }
 
@@ -42,7 +38,7 @@ export class BladeCompiler {
 
   /**
    * Compile Blade template → EJS source.
-   * Throw lỗi BladeTemplateError với line/column khi template sai.
+   * Throws BladeTemplateError with line/column when the template is invalid.
    */
   compile(templateContent: string, templatePath: string): string {
     const contentHash = this.contentHash(templateContent);
@@ -82,7 +78,8 @@ export class BladeCompiler {
   }
 
   /**
-   * Parse template thành AST — dùng cho test hoặc integration với renderer mới.
+   * Parse template into an AST — used for testing or integration
+   * with the native runtime.
    */
   parse(templateContent: string, templatePath?: string) {
     const lexer = new BladeLexer(templateContent, { templatePath });
@@ -92,8 +89,8 @@ export class BladeCompiler {
   }
 
   /**
-   * Compile với output EJS đầy đủ (bao gồm cả directive execution).
-   * Trả về EJS source thuần; không có marker BLADE_*.
+   * Compile with full EJS output (including directive execution).
+   * Returns pure EJS source; no BLADE_* markers.
    */
   compilePure(templateContent: string, templatePath: string): string {
     const ast = this.parse(templateContent, templatePath);
