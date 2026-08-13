@@ -761,3 +761,9 @@ function splitTopLevelComma(args: string): string[] {
 
   return parts;
 }
+
+// Helper function to parse
+export function parse(tokens: BladeToken[], options?: ParseOptions): ASTNode[] {
+  const parser = new BladeParser(tokens, options);
+  return parser.parse();
+}

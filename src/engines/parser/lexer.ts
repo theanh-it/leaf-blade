@@ -13,6 +13,10 @@
  */
 import type { BladeSourceLocation } from "./diagnostics.js";
 
+// Known directives list - used in both isDirectiveStart() and isInterestingAhead()
+// Extracted to constant to avoid duplication
+const DIRECTIVE_NAMES = 'if|elseif|else|endif|foreach|endforeach|for|endfor|while|endwhile|js|endjs|include|section|endsection|extends|yield';
+
 export type BladeTokenType =
   | "TEXT"
   | "COMMENT"
@@ -40,8 +44,7 @@ export interface BladeToken {
 }
 
 export interface LexerOptions {
-  /** Tên file template để gắn vào diagnostics */
-  templatePath?: string;
+  // Reserved for future diagnostics propagation
 }
 
 export class BladeLexer {
@@ -50,10 +53,8 @@ export class BladeLexer {
   private line = 1;
   private column = 0;
 
-  constructor(source: string, options: LexerOptions = {}) {
+  constructor(source: string, _options: LexerOptions = {}) {
     this.source = source;
-    // options.templatePath reserved for future diagnostics propagation.
-    void options;
   }
 
   tokenize(): BladeToken[] {
@@ -101,13 +102,9 @@ export class BladeLexer {
 
   private isDirectiveStart(): boolean {
     // @ hợp lệ nếu tiếp theo là một directive đã biết (name là a-zA-Z_)
-    // và ký tự sau directive name không phải [a-zA-Z_] (digit được cho phép
-    // ở đây vì không có directive Blade nào có tiền tố giống directive khác
-    // cộng digit).
+    // và ký tự sau directive name không phải [a-zA-Z_].
     const rest = this.source.slice(this.pos);
-    return /^(if|elseif|else|endif|foreach|endforeach|for|endfor|while|endwhile|js|endjs|include|section|endsection|extends|yield|php|endphp)(?![a-zA-Z_])/.test(
-      rest.slice(1)
-    );
+    return new RegExp(`^(${DIRECTIVE_NAMES})(?![a-zA-Z_])`).test(rest.slice(1));
   }
 
   // ------------------------------------------------------------------
@@ -328,13 +325,11 @@ export class BladeLexer {
     // Directive name: [a-zA-Z_]+ theo sau bởi ( char thuộc nhóm dừng ).
     // Trong Blade, directive luôn kết thúc ở space, tab, newline, `(`, `)`,
     // `{`, `}`, `,`, `:`, hoặc ký tự toán tử. Nếu tiếp theo là digit/letter
-    // thì đó có thể là một identifier dài hơn; nhưng trong thực tế, Blade
-    // không có directive nào mà tên là tiền tố của directive khác kèm
-    // digit phía sau (ví dụ: @else3 không phải directive). Vì vậy ta yêu
-    // cầu ký tự theo sau directive name là char "dừng".
-    return /^@(if|elseif|else|endif|foreach|endforeach|for|endfor|while|endwhile|js|endjs|include|section|endsection|extends|yield|php|endphp)(?![a-zA-Z_])/.test(
-      rest
-    );
+    // Nếu @ không match directive pattern, vẫn cần check xem có phải là
+    // @expression ({{ ... }}) hay chỉ là text thường. Cách nhanh nhất là
+    // thử match với pattern đầy đủ (bao gồm @ prefix). Nếu match → text
+    // bình thường (không phải directive). Nếu không match → @expression.
+    return new RegExp(`^@(${DIRECTIVE_NAMES})(?![a-zA-Z_])`).test(rest);
   }
 
   private consumeUntilInteresting(): string {
@@ -458,4 +453,10 @@ function stripOuterParens(value: string): string {
     return value.slice(1, -1).trim();
   }
   return value;
+}
+
+// Helper function to tokenize
+export function tokenize(source: string, options?: LexerOptions): BladeToken[] {
+  const lexer = new BladeLexer(source, options);
+  return lexer.tokenize();
 }

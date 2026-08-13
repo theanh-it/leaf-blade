@@ -23,6 +23,7 @@ import type { Op } from './codegen.js';
 import { ExpressionEvaluator } from './expression-evaluator.js';
 
 export interface CompiledRuntimeOptions {
+  security?: boolean;
   maxIterations?: number;
   maxDepth?: number;
   evaluator?: ExpressionEvaluator;
@@ -46,7 +47,7 @@ export class CompiledRuntime {
   })();
 
   constructor(options: CompiledRuntimeOptions = {}) {
-    this.evaluator = options.evaluator || new ExpressionEvaluator();
+    this.evaluator = options.evaluator || new ExpressionEvaluator({ security: options.security });
     this.maxIterations = options.maxIterations || 10000;
     this.maxDepth = options.maxDepth || 100;
   }

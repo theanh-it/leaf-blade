@@ -1,8 +1,9 @@
 /**
  * Blade Runtime Interpreter
- * 
- * Native runtime để evaluate AST thành HTML, thay thế EJS.
- * Được thiết kế để:
+ *
+ * Native runtime to evaluate AST → HTML.
+ *
+ * Goals:
  * - Fast: Direct AST interpretation
  * - Safe: Sandboxed expression evaluation
  * - Lightweight: Minimal dependencies
@@ -12,6 +13,12 @@ import type { ASTNode, IfNode, ForEachNode, ForNode, WhileNode, IncludeScopeNode
 import { ExpressionEvaluator } from "./expression-evaluator.js";
 
 export interface RuntimeOptions {
+  /**
+   * Enable security features (dangerous prop blocking, sandboxing)
+   * @default true
+   */
+  security?: boolean;
+
   /**
    * Maximum iterations for loops (prevent infinite loops)
    * @default 10000
@@ -25,7 +32,7 @@ export interface RuntimeOptions {
   maxDepth?: number;
 
   /**
-   * Custom expression evaluator
+   * Custom expression evaluator (overrides security option)
    */
   evaluator?: ExpressionEvaluator;
 }
@@ -39,7 +46,11 @@ export class BladeRuntime {
   private nodeStack: ASTNode[] = [];
 
   constructor(options: RuntimeOptions = {}) {
-    this.evaluator = options.evaluator || new ExpressionEvaluator();
+    if (options.evaluator) {
+      this.evaluator = options.evaluator;
+    } else {
+      this.evaluator = new ExpressionEvaluator({ security: options.security });
+    }
     this.maxIterations = options.maxIterations || 10000;
     this.maxDepth = options.maxDepth || 100;
   }

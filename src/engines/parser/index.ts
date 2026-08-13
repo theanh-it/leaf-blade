@@ -1,8 +1,8 @@
 /**
- * Public entry point cho parser module.
+ * Public entry point for the parser module.
  *
- * `BladeCompiler.parse()` là API chính, được `BladeRenderer` dùng để lấy
- * AST và evaluate trực tiếp qua native runtime (không qua EJS).
+ * `BladeCompiler.parse()` is the main API, used by `BladeRenderer` to
+ * obtain the AST and evaluate it directly through the native runtime.
  */
 export {
   BladeCompiler,

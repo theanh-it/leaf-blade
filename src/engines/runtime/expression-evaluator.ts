@@ -8,6 +8,12 @@
 
 export interface EvaluatorOptions {
   /**
+   * Enable security features (dangerous prop blocking, sandboxing)
+   * @default true
+   */
+  security?: boolean;
+
+  /**
    * Allow access to these globals
    * @default ['Math', 'Date', 'JSON', 'String', 'Number', 'Boolean', 'Array', 'Object', 'console']
    */
@@ -20,10 +26,6 @@ export interface EvaluatorOptions {
   maxCacheSize?: number;
 }
 
-// Simple property access pattern: `name`, `user.name`, `a.b.c`
-const SIMPLE_PROPERTY_REGEX = /^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*$/;
-// Optional chaining pattern: `user?.name`, `a?.b?.c`
-const OPTIONAL_CHAIN_REGEX = /^[a-zA-Z_$][\w$]*(?:\?\.?[a-zA-Z_$][\w$]*)*$/;
 // JavaScript literals that should NOT go through fast-path (they need real JS evaluation)
 const LITERAL_KEYWORDS = new Set(['true', 'false', 'null', 'undefined', 'NaN', 'Infinity']);
 
@@ -70,6 +72,7 @@ export class ExpressionEvaluator {
   private allowedGlobals: Set<string>;
   private safeGlobals: Record<string, any>;
   private maxCacheSize: number;
+  private securityEnabled: boolean;
   // LRU caches - guarantees hot entries aren't evicted under concurrent load
   private expressionCache: LRUCache<(scope: any) => any>;
   private statementCache: LRUCache<(scope: any) => any>;
@@ -120,6 +123,7 @@ export class ExpressionEvaluator {
       ]
     );
     this.maxCacheSize = options.maxCacheSize ?? 1000;
+    this.securityEnabled = options.security ?? true;
     this.safeGlobals = this.buildSafeGlobals();
     this.expressionCache = new LRUCache(this.maxCacheSize);
     this.statementCache = new LRUCache(this.maxCacheSize);
@@ -143,6 +147,11 @@ export class ExpressionEvaluator {
     let cachedKind = this.fastPathCache.get(expression);
     if (cachedKind === undefined) {
       cachedKind = ExpressionEvaluator.isSimpleExpression(expression) ? 1 : 0;
+      // Evict oldest entry if cache is full
+      if (this.fastPathCache.size >= ExpressionEvaluator.FAST_PATH_CACHE_MAX) {
+        const firstKey = this.fastPathCache.keys().next().value;
+        if (firstKey !== undefined) this.fastPathCache.delete(firstKey);
+      }
       this.fastPathCache.set(expression, cachedKind);
     }
     if (cachedKind === 1) {
@@ -150,15 +159,14 @@ export class ExpressionEvaluator {
       if (fastResult !== ExpressionEvaluator.FAST_PATH_MISS) {
         return fastResult;
       }
-      // Was simple but missed (e.g., key not in context) - update cache
-      // Don't update (might be valid for different context later)
     }
 
     // Slow path: full evaluation with Proxy
     return this.evaluateWithProxy(expression, context);
   }
 
-  // Cache to skip regex test on repeated calls
+  // Cache to skip regex test on repeated calls (bounded to prevent memory leak)
+  private static readonly FAST_PATH_CACHE_MAX = 1000;
   private fastPathCache: Map<string, number> = new Map();
 
   /**
@@ -187,45 +195,39 @@ export class ExpressionEvaluator {
       return ExpressionEvaluator.FAST_PATH_MISS;
     }
 
-    // Check if it's a safe property chain
-    if (!SIMPLE_PROPERTY_REGEX.test(expr) && !OPTIONAL_CHAIN_REGEX.test(expr)) {
+    // Single identifier: check context first, then globals
+    if (expr.indexOf('.') === -1 && expr.indexOf('?') === -1) {
+      if (Object.prototype.hasOwnProperty.call(context, expr)) {
+        return context[expr];
+      }
+      if (Object.prototype.hasOwnProperty.call(this.safeGlobals, expr)) {
+        return this.safeGlobals[expr];
+      }
       return ExpressionEvaluator.FAST_PATH_MISS;
     }
 
-    // Security: split and check each segment for dangerous properties
+    // Security: check each segment for dangerous properties (skip if security disabled)
     const parts = expr.split('.');
-    for (const part of parts) {
-      const key = part.endsWith('?') ? part.slice(0, -1) : part;
-      if (ExpressionEvaluator.DANGEROUS_PROPS.has(key)) {
-        return ExpressionEvaluator.FAST_PATH_MISS;
+    if (this.securityEnabled) {
+      for (const part of parts) {
+        const key = part.endsWith('?') ? part.slice(0, -1) : part;
+        if (ExpressionEvaluator.DANGEROUS_PROPS.has(key)) {
+          return ExpressionEvaluator.FAST_PATH_MISS;
+        }
       }
     }
 
-    // Decide starting point: context for own keys, safeGlobals for top-level
-    // custom globals (e.g., `{{ MyHelper }}` after addGlobal).
-    // Must use hasOwnProperty (not `in`) to avoid Object.prototype pollution
-    // (toString, hasOwnProperty, constructor, etc. would leak otherwise).
+    // Resolve first key
     const firstKey = parts[0].endsWith('?') ? parts[0].slice(0, -1) : parts[0];
-    const isSingleIdentifier = parts.length === 1;
-    const inContext = Object.prototype.hasOwnProperty.call(context, firstKey);
-    const inGlobals = Object.prototype.hasOwnProperty.call(this.safeGlobals, firstKey);
 
-    if (!inContext) {
-      // Single identifier not in context → must be a global → slow path
-      if (isSingleIdentifier && !inGlobals) {
-        return ExpressionEvaluator.FAST_PATH_MISS;
-      }
-      // Multi-segment but first key isn't in context → can't resolve via fast-path
-      if (!isSingleIdentifier) {
-        return ExpressionEvaluator.FAST_PATH_MISS;
-      }
+    if (!Object.prototype.hasOwnProperty.call(context, firstKey)) {
+      return ExpressionEvaluator.FAST_PATH_MISS;
     }
 
-    // Pick start: own properties of context, OR safeGlobals for single identifier
-    let current: any = inContext ? context[firstKey] : this.safeGlobals[firstKey];
+    // Walk the property chain
+    let current: any = context[firstKey];
     let pendingOptional = false;
 
-    // Process remaining segments (skip first since we just resolved it)
     for (let i = 1; i < parts.length; i++) {
       const part = parts[i];
       if (pendingOptional && current == null) return undefined;
@@ -252,7 +254,9 @@ export class ExpressionEvaluator {
    * Security validation happens here, before compilation.
    */
   private evaluateWithProxy(expression: string, context: Record<string, any>): any {
-    this.validateExpression(expression);
+    if (this.securityEnabled) {
+      this.validateExpression(expression);
+    }
 
     let func = this.expressionCache.get(expression);
     if (!func) {
@@ -280,7 +284,9 @@ export class ExpressionEvaluator {
       return;
     }
 
-    this.validateExpression(statement);
+    if (this.securityEnabled) {
+      this.validateExpression(statement);
+    }
 
     let func = this.statementCache.get(statement);
     if (!func) {

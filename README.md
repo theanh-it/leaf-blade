@@ -1,8 +1,8 @@
 # 🌿 Leaf Blade
 
-Blade template engine for Leaf framework — Laravel Blade-like syntax for JavaScript/TypeScript. **v1.0.1 uses a fully native AST runtime with codegen optimization — zero EJS dependency, 3.7x faster than v1.0.0.**
+Blade template engine for Leaf framework — Laravel Blade-like syntax for JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -123,9 +123,9 @@ interface BladeOptions {
 - ✅ **Comments**: `{{-- --}}`
 - ✅ **JavaScript blocks**: `@js` ... `@endjs` (execute JavaScript code)
 
-### Architecture (v1.0.1)
+### Architecture (v1.1.0)
 
-v1.0.0 replaces the EJS-based engine with a fully native pipeline. v1.0.1 adds **codegen optimization**:
+v1.0.0 uses a fully native AST pipeline. v1.1.0 adds **optimized function codegen** for maximum performance:
 
 ```
 Template source
@@ -133,26 +133,31 @@ Template source
   → BladeParser     (build AST)
   → TemplateComposer (resolve @extends / @section / @yield)
   → IncludeProcessor (inline @include with correct scope)
-  → Codegen          (flatten AST → flat ops array, v1.0.1+)
-  → CompiledRuntime  (tight-loop interpreter for ops, v1.0.1+)
+  → FunctionCodegen  (generate optimized JavaScript function, v1.1.0+)
+  → CompiledBlade    (execute generated function, v1.1.0+)
 ```
 
-No EJS. No intermediate code generation. The AST is flattened into a compact
-ops array (text/expression/if/foreach/for/while/js/include-scope) and executed
-via a type-tagged switch — eliminating the dispatch overhead of AST-walking.
+No intermediate code generation. The AST is compiled directly into
+optimized JavaScript functions for maximum performance.
 
-### Performance (v1.0.1)
+### Performance (v1.1.0)
 
-- ✅ **Codegen optimization**: AST → flat ops array → tight-loop execution
-- ✅ **Native AST evaluation**: No EJS compilation step
-- ✅ **In-memory caching**: Parsed AST, template source, AND compiled ops cached until `clearCache()`
+- ✅ **Function codegen**: AST → optimized JavaScript function
+- ✅ **Zero-overhead caching**: Template string as cache key (no hashing)
+- ✅ **Simple for-of loops**: V8-optimized iteration (no complex indexed loops)
+- ✅ **Coalesced text output**: Minimized function calls
 - ✅ **HTML minification**: Automatically minifies HTML in production
 - ✅ **Async I/O**: Non-blocking file reads with symlink + path-traversal checks
-- ✅ **Sync hot path**: After first render, `renderSync()` bypasses async overhead
 
-**Benchmark (full template with extends + 2 includes + 10-iter loop)**:
-- v1.0.0: ~0.502ms (1993 renders/sec)
-- v1.0.1: **~0.135ms (7381 renders/sec) — 3.7x faster** 🚀
+**Benchmark (10,000 iterations, Bun 1.2.5)**:
+
+| Template | ops/s |
+|----------|-------|
+| Simple (static + 2 vars) | 724,663 |
+| Medium (conditionals) | 733,165 |
+| List (100-item loop) | 12,729 |
+| Complex (10 sections × 10 items) | 11,584 |
+| Heavy (500-row table) | 1,116 |
 
 ### Security
 
@@ -494,6 +499,40 @@ renderer.clearCache();
 
 ## 📋 Changelog
 
+### [1.1.0] - 2026-08-13
+
+🚀 **Minor Release: Optimized Function Codegen**
+
+#### ⚡ Performance
+
+- **Function codegen pipeline**: AST is compiled directly into optimized JavaScript functions at first render. The generated function is cached by template source (no hashing) and reused on subsequent renders.
+- **V8-optimized iteration**: Replaces indexed loop patterns with simple `for…of` for faster string-based dispatch.
+- **Coalesced text output**: Adjacent text/values are merged into single push calls, reducing output-buffer overhead.
+- **Zero-overhead caching**: Template source string is used directly as the cache key, avoiding per-render hashing.
+
+#### ✨ New Components
+
+- **`FunctionCodegen`** (`src/engines/runtime/function-codegen.ts`): AST → optimized JavaScript function compiler
+  - Generates a single function per template using the `Function` constructor
+  - Inlines expression evaluation, loops, conditionals, and helpers
+- **`CompiledBlade`** (`src/engines/compiled-blade.ts`): Executes the generated function against a runtime context
+  - Replaces the per-node AST walk with a single function call
+
+#### 📊 Benchmark
+
+| Template | ops/s |
+|----------|-------|
+| Simple (static + 2 vars) | 724,663 |
+| Medium (conditionals) | 733,165 |
+| List (100-item loop) | 12,729 |
+| Complex (10 sections × 10 items) | 11,584 |
+| Heavy (500-row table) | 1,116 |
+
+#### 📦 Bundle & Tests
+
+- **Tests**: 233 tests, all passing
+- **API compatibility**: 100% backward compatible with v1.0.1
+
 ### [1.0.1] - 2026-08-11
 
 🚀 **Performance Release: Full AST Codegen Optimization**
@@ -696,13 +735,13 @@ Template lookup is now confined to `viewsDir`. If an application used `../` path
 bun test
 ```
 
-The v1.0.1 test suite contains **230 tests** covering:
+The v1.1.0 test suite contains **233 tests** covering:
 - **Lexer**: Tokenization, error handling, edge cases
 - **Parser**: AST generation, validation, error diagnostics
 - **Runtime**: Expression evaluation, scope management, execution
 - **Composer**: Layout inheritance, section accumulation, circular detection
 - **Include Processor**: Partial inlining, data expressions, scope isolation
-- **Codegen (v1.0.1+)**: AST flattening, ops array compilation, CompiledRuntime execution, elseif chains, maxDepth enforcement
+- **Codegen (v1.1.0+)**: Function generation, optimized loops, text coalescing, zero-overhead caching
 - **Renderer**: End-to-end template rendering with all features
 - **Security**: XSS prevention, path traversal, symlink protection, expression sandboxing
 - **Integration**: Complete real-world scenarios (blog, dashboard, e-commerce)

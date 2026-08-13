@@ -2,7 +2,7 @@
  * Blade Renderer
  *
  * Native runtime renderer (v1.0.0+): parse → compose (@extends/@section/
- * @yield) → process @include → evaluate AST. Không phụ thuộc EJS.
+ * @yield) → process @include → evaluate AST.
  */
 
 import { constants, type Stats } from "node:fs";
@@ -155,6 +155,30 @@ export class BladeRenderer implements TemplateLoader {
     }
 
     const ops = this.opsCache.get(templatePath)!;
+    return this.compiledRuntime.execute(ops, data);
+  }
+
+  /**
+   * Render a string template directly (no file I/O).
+   * Compiles and executes in one call. Use for testing or dynamic templates.
+   */
+  renderString(template: string, data: Record<string, any> = {}): string {
+    const templatePath = this.resolveTemplate(template);
+
+    // Check cache
+    if (this.cache && this.opsCache.has(templatePath)) {
+      return this.compiledRuntime.execute(this.opsCache.get(templatePath)!, data);
+    }
+
+    // Parse string template to AST, then compile to ops
+    const ast = this.compiler.parse(template, templatePath);
+    const ops = compileNodes(ast);
+
+    // Cache if enabled
+    if (this.cache) {
+      this.opsCache.set(templatePath, ops);
+    }
+
     return this.compiledRuntime.execute(ops, data);
   }
 

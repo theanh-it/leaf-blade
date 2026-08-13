@@ -2,10 +2,11 @@
  * Code generator: AST → EJS source.
  *
  * @remarks
- * `BladeRenderer` (native runtime, v1.0.0+) evaluate AST trực tiếp và
- * KHÔNG dùng module này. Codegen được giữ lại như một pipeline độc lập
- * (lexer → parser → codegen) sinh ra EJS source thuần, hữu ích cho debug,
- * so sánh output, hoặc tái sử dụng ở nơi khác cần EJS string thay vì AST.
+ * `BladeRenderer` (native runtime, v1.0.0+) evaluates the AST directly and
+ * does NOT use this module. The codegen pipeline is exposed as an
+ * independent utility (lexer → parser → codegen) that produces pure EJS
+ * source — useful for debugging, output comparison, or downstream tooling
+ * that consumes an EJS string instead of an AST.
  */
 import type {
   ASTNode,
@@ -24,10 +25,10 @@ import type {
 
 export interface CodeGenOptions {
   /**
-   * Khi `true` (mặc định), sinh thêm marker `<!-- BLADE_* -->` bên cạnh EJS
-   * cho layout/section/yield/include — hữu ích khi cần xử lý layout ở tầng
-   * ngoài EJS. Khi `false`, output chỉ chứa EJS thuần (dùng cho
-   * `compilePure()`).
+   * When `true` (default), emit `<!-- BLADE_* -->` markers alongside the
+   * EJS output for layout/section/yield/include — useful when layout
+   * handling lives outside EJS. When `false`, output is pure EJS
+   * (used by `compilePure()`).
    */
   preserveMarkers?: boolean;
 }
@@ -65,7 +66,7 @@ export class BladeCodeGenerator {
       case "While":
         return this.generateWhile(node);
       case "Extends":
-        // Layout sẽ được renderer xử lý, không sinh EJS
+        // Layout is handled by the renderer; no EJS emitted here
         if (this.preserveMarkers) {
           this.output.push(`<!-- BLADE_EXTENDS:${node.layout} -->`);
         }
@@ -79,7 +80,7 @@ export class BladeCodeGenerator {
       case "Js":
         return this.generateJs(node);
       case "Comment":
-        // Comments luôn bị loại bỏ
+        // Comments are always stripped
         return;
       default:
         return;
@@ -192,8 +193,8 @@ export class BladeCodeGenerator {
   }
 
   private generateJs(node: JsNode): void {
-    // @js body được renderer cũ xử lý trước; ở giai đoạn này chỉ cần
-    // sinh marker hoặc EJS execution tương đương.
+    // @js body was processed by the legacy renderer; here we only need
+    // to emit a marker or the equivalent EJS execution
     if (this.preserveMarkers) {
       this.output.push(`<!-- BLADE_JS_START -->`);
       const cleanCode = node.code.replace(/^\s*return\s+/gm, "");
@@ -239,11 +240,17 @@ export function transformExpression(expr: string): string {
 }
 
 /**
- * Trong EJS, `%` ngay sau `<%` mở có thể gây nhầm với `%>` đóng. Ở đây
- * chúng tôi chỉ escape backslash và newline; logic literal escape đã
- * có `<%=` và `<%-`. Hàm này được giữ để dễ mở rộng nếu cần escape EJS
- * delimiter trong TEXT (hiện tại Blade TEXT không chứa `<%` nên chưa cần).
+ * Reserved for future use: a `%` immediately after `<%` could clash with
+ * the closing `%>` delimiter in some EJS parsers. Currently Blade TEXT
+ * cannot contain `<%`, so the body of this helper is intentionally a
+ * no-op and is kept here to make future EJS-delimiter escaping trivial.
  */
 function escapeEjsText(text: string): string {
   return text;
+}
+
+// Helper function to generate code
+export function generateCode(nodes: ASTNode[], options?: CodeGenOptions): string {
+  const generator = new BladeCodeGenerator(options);
+  return generator.generate(nodes);
 }

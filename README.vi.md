@@ -1,8 +1,8 @@
 # 🌿 Leaf Blade
 
-Blade template engine cho Leaf framework — Laravel Blade-like syntax cho JavaScript/TypeScript. **v1.0.1 sử dụng native AST runtime với codegen optimization — không phụ thuộc EJS, nhanh hơn 3.7x so với v1.0.0.**
+Blade template engine cho Leaf framework — Laravel Blade-like syntax cho JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -123,9 +123,9 @@ interface BladeOptions {
 - ✅ **Comments**: `{{-- --}}`
 - ✅ **JavaScript blocks**: `@js` ... `@endjs` (chạy JavaScript code)
 
-### Kiến Trúc (v1.0.1)
+### Kiến Trúc (v1.1.0)
 
-v1.0.0 thay thế engine EJS bằng pipeline native hoàn toàn. v1.0.1 bổ sung **codegen optimization**:
+v1.0.0 sử dụng pipeline AST native hoàn toàn. v1.1.0 bổ sung **function codegen tối ưu** để đạt hiệu năng tối đa:
 
 ```
 Template source
@@ -133,26 +133,31 @@ Template source
   → BladeParser      (build AST)
   → TemplateComposer (resolve @extends / @section / @yield)
   → IncludeProcessor (inline @include với scope chính xác)
-  → Codegen          (flatten AST → ops array phẳng, v1.0.1+)
-  → CompiledRuntime  (tight-loop interpreter cho ops, v1.0.1+)
+  → FunctionCodegen  (sinh JavaScript function tối ưu, v1.1.0+)
+  → CompiledBlade    (thực thi generated function, v1.1.0+)
 ```
 
-Không EJS. Không sinh code trung gian. AST được làm phẳng thành mảng ops
-gọn nhẹ (text/expression/if/foreach/for/while/js/include-scope) và execute
-qua switch theo type-tag — loại bỏ overhead dispatch khi walk AST.
+Không sinh code trung gian. AST được compile trực tiếp thành
+JavaScript function tối ưu để đạt hiệu năng tối đa.
 
-### Performance (v1.0.1)
+### Performance (v1.1.0)
 
-- ✅ **Codegen optimization**: AST → mảng ops phẳng → tight-loop execution
-- ✅ **Native AST evaluation**: Không cần bước compile EJS
-- ✅ **In-memory caching**: AST, source, VÀ compiled ops được cache cho đến khi `clearCache()`
+- ✅ **Function codegen**: AST → JavaScript function tối ưu
+- ✅ **Zero-overhead caching**: Dùng template string làm cache key (không hash)
+- ✅ **Simple for-of loops**: V8-optimized iteration (không dùng indexed loops phức tạp)
+- ✅ **Coalesced text output**: Giảm thiểu function calls
 - ✅ **HTML minification**: Tự động minify HTML trong production
 - ✅ **Async I/O**: Non-blocking file reads với kiểm tra symlink và path traversal
-- ✅ **Sync hot path**: Sau lần render đầu, `renderSync()` bỏ qua async overhead
 
-**Benchmark (full template với extends + 2 includes + 10-iter loop)**:
-- v1.0.0: ~0.502ms (1993 renders/sec)
-- v1.0.1: **~0.135ms (7381 renders/sec) — nhanh hơn 3.7x** 🚀
+**Benchmark (10,000 iterations, Bun 1.2.5)**:
+
+| Template | ops/s |
+|----------|-------|
+| Simple (static + 2 vars) | 724,663 |
+| Medium (conditionals) | 733,165 |
+| List (100-item loop) | 12,729 |
+| Complex (10 sections × 10 items) | 11,584 |
+| Heavy (500-row table) | 1,116 |
 
 ### Bảo Mật
 
@@ -494,6 +499,40 @@ renderer.clearCache();
 
 ## 📋 Changelog
 
+### [1.1.0] - 2026-08-13
+
+🚀 **Minor Release: Function Codegen Tối Ưu**
+
+#### ⚡ Hiệu năng
+
+- **Function codegen pipeline**: AST được compile trực tiếp thành JavaScript function tối ưu ở lần render đầu. Function được cache theo template source (không hashing) và tái sử dụng cho các lần render sau.
+- **V8-optimized iteration**: Thay thế các pattern indexed loop bằng `for…of` đơn giản để dispatch nhanh hơn.
+- **Coalesced text output**: Các text/value liền kề được gộp thành một push call duy nhất, giảm overhead của output buffer.
+- **Zero-overhead caching**: Template source string được dùng trực tiếp làm cache key, tránh hashing mỗi lần render.
+
+#### ✨ Component mới
+
+- **`FunctionCodegen`** (`src/engines/runtime/function-codegen.ts`): AST → compiler sinh JavaScript function tối ưu
+  - Sinh một function duy nhất cho mỗi template bằng `Function` constructor
+  - Inline expression evaluation, loops, conditionals và helpers
+- **`CompiledBlade`** (`src/engines/compiled-blade.ts`): Thực thi generated function với runtime context
+  - Thay thế việc walk qua từng node AST bằng một function call duy nhất
+
+#### 📊 Benchmark
+
+| Template | ops/s |
+|----------|-------|
+| Simple (static + 2 vars) | 724,663 |
+| Medium (conditionals) | 733,165 |
+| List (100-item loop) | 12,729 |
+| Complex (10 sections × 10 items) | 11,584 |
+| Heavy (500-row table) | 1,116 |
+
+#### 📦 Bundle & Tests
+
+- **Tests**: 233 tests, tất cả pass
+- **API compatibility**: 100% tương thích ngược với v1.0.1
+
 ### [1.0.1] - 2026-08-11
 
 🚀 **Bản Phát Hành Hiệu Năng: Full AST Codegen Optimization**
@@ -696,13 +735,13 @@ Việc tìm template giờ bị giới hạn trong `viewsDir`. Nếu ứng dụn
 bun test
 ```
 
-Test suite v1.0.1 chứa **230 tests** bao gồm:
+Test suite v1.1.0 chứa **233 tests** bao gồm:
 - **Lexer**: Tokenization, error handling, edge cases
 - **Parser**: AST generation, validation, error diagnostics
 - **Runtime**: Expression evaluation, scope management, execution
 - **Composer**: Layout inheritance, section accumulation, circular detection
 - **Include Processor**: Partial inlining, data expressions, scope isolation
-- **Codegen (v1.0.1+)**: AST flattening, ops array compilation, CompiledRuntime execution, elseif chains, maxDepth enforcement
+- **Codegen (v1.1.0+)**: Function generation, optimized loops, text coalescing, zero-overhead caching
 - **Renderer**: End-to-end template rendering với tất cả features
 - **Security**: XSS prevention, path traversal, symlink protection, expression sandboxing
 - **Integration**: Complete real-world scenarios (blog, dashboard, e-commerce)
