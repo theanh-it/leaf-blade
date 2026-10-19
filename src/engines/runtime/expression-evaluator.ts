@@ -1,14 +1,14 @@
 /**
  * Expression Evaluator
  *
- * Safe evaluation của JavaScript expressions trong template context.
- * Security-first design với sandboxing và whitelist approach.
+ * Evaluation of developer-owned JavaScript template expressions.
+ * Guards provide defense in depth, not isolation for untrusted JavaScript.
  * Performance-optimized với LRU expression caching và fast-path.
  */
 
 export interface EvaluatorOptions {
   /**
-   * Enable security features (dangerous prop blocking, sandboxing)
+   * Enable expression guards; this is not isolation for untrusted JavaScript.
    * @default true
    */
   security?: boolean;
@@ -93,6 +93,8 @@ export class ExpressionEvaluator {
     /\bglobal\s*\./,
     /\bwindow\s*\./,
     /\bdocument\s*\./,
+    /\bglobalThis\b/,
+    /\bthis\b/,
     /\bvalueOf\b\s*\(/,          // valueOf() can be exploited
   ] as const;
 
@@ -133,133 +135,53 @@ export class ExpressionEvaluator {
    * Fast-path evaluator: bypasses Proxy overhead for simple property access.
    * Handles: `name`, `user.name`, `user?.name`, `a.b.c`
    *
-   * Security: Performs dangerous-prop check inline. Returns FAST_PATH_MISS
-   * if expression contains operators or unsafe properties, falling through
-   * to validateExpression() in the slow path.
+   * Parse/check a property path once. Complex expressions and guarded property
+   * names fall back to validation and cached JavaScript evaluation.
    */
   evaluate(expression: string, context: Record<string, any>): any {
     if (!expression || (expression = expression.trim()) === '') {
       return undefined;
     }
 
-    // Fast-path: simple property access (very common in templates)
-    // Cached: skip regex check after first call if expression is simple
-    let cachedKind = this.fastPathCache.get(expression);
-    if (cachedKind === undefined) {
-      cachedKind = ExpressionEvaluator.isSimpleExpression(expression) ? 1 : 0;
-      // Evict oldest entry if cache is full
+    // Parse and validate identifier paths once, including inherited loop/include
+    // scopes. Do not allocate a new parts array on each evaluation.
+    let parts = this.fastPathCache.get(expression);
+    if (parts === undefined) {
+      const simple = !LITERAL_KEYWORDS.has(expression) && /^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*|\?\.[a-zA-Z_$][\w$]*)*$/.test(expression);
+      parts = simple ? expression.replace(/\?/g, "").split(".") : null;
+      if (parts && this.securityEnabled && parts.some(key => ExpressionEvaluator.DANGEROUS_PROPS.has(key))) parts = null;
       if (this.fastPathCache.size >= ExpressionEvaluator.FAST_PATH_CACHE_MAX) {
-        const firstKey = this.fastPathCache.keys().next().value;
-        if (firstKey !== undefined) this.fastPathCache.delete(firstKey);
+        const oldest = this.fastPathCache.keys().next();
+        if (!oldest.done) this.fastPathCache.delete(oldest.value);
       }
-      this.fastPathCache.set(expression, cachedKind);
+      this.fastPathCache.set(expression, parts);
     }
-    if (cachedKind === 1) {
-      const fastResult = this.evaluateSimple(expression, context);
-      if (fastResult !== ExpressionEvaluator.FAST_PATH_MISS) {
-        return fastResult;
+    if (parts) {
+      const first = parts[0];
+      let value: unknown;
+      if (first in context) value = context[first];
+      else if (Object.prototype.hasOwnProperty.call(this.safeGlobals, first)) value = this.safeGlobals[first];
+      else return this.evaluateWithProxy(expression, context);
+      for (let i = 1; i < parts.length; i++) {
+        if (value == null) return undefined;
+        value = (value as Record<string, unknown>)[parts[i]];
       }
+      return value;
     }
-
-    // Slow path: full evaluation with Proxy
     return this.evaluateWithProxy(expression, context);
   }
 
-  // Cache to skip regex test on repeated calls (bounded to prevent memory leak)
   private static readonly FAST_PATH_CACHE_MAX = 1000;
-  private fastPathCache: Map<string, number> = new Map();
-
-  /**
-   * Quick check: is this a simple identifier chain (a.b.c or a?.b.c)?
-   * Used for fast-path caching - faster than full evaluateSimple check.
-   */
-  private static isSimpleExpression(expr: string): boolean {
-    return /^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*|\?\.[a-zA-Z_$][\w$]*)*$/.test(expr);
-  }
-
-  /**
-   * Fast-path evaluation for simple property chains.
-   * Returns FAST_PATH_MISS if not applicable, otherwise the value or undefined.
-   *
-   * Walks both user context AND safeGlobals (so custom globals like
-   * `{{ MyHelper }}` work without going through slow-path).
-   */
-  private evaluateSimple(expr: string, context: Record<string, any>): any {
-    // Must start with identifier character (not a literal like 'true', 'null', '123')
-    if (!/^[a-zA-Z_$]/.test(expr)) {
-      return ExpressionEvaluator.FAST_PATH_MISS;
-    }
-
-    // Block literal keywords - these need Proxy evaluation
-    if (LITERAL_KEYWORDS.has(expr)) {
-      return ExpressionEvaluator.FAST_PATH_MISS;
-    }
-
-    // Single identifier: check context first, then globals
-    if (expr.indexOf('.') === -1 && expr.indexOf('?') === -1) {
-      if (Object.prototype.hasOwnProperty.call(context, expr)) {
-        return context[expr];
-      }
-      if (Object.prototype.hasOwnProperty.call(this.safeGlobals, expr)) {
-        return this.safeGlobals[expr];
-      }
-      return ExpressionEvaluator.FAST_PATH_MISS;
-    }
-
-    // Security: check each segment for dangerous properties (skip if security disabled)
-    const parts = expr.split('.');
-    if (this.securityEnabled) {
-      for (const part of parts) {
-        const key = part.endsWith('?') ? part.slice(0, -1) : part;
-        if (ExpressionEvaluator.DANGEROUS_PROPS.has(key)) {
-          return ExpressionEvaluator.FAST_PATH_MISS;
-        }
-      }
-    }
-
-    // Resolve first key
-    const firstKey = parts[0].endsWith('?') ? parts[0].slice(0, -1) : parts[0];
-
-    if (!Object.prototype.hasOwnProperty.call(context, firstKey)) {
-      return ExpressionEvaluator.FAST_PATH_MISS;
-    }
-
-    // Walk the property chain
-    let current: any = context[firstKey];
-    let pendingOptional = false;
-
-    for (let i = 1; i < parts.length; i++) {
-      const part = parts[i];
-      if (pendingOptional && current == null) return undefined;
-
-      const hasTrailingOptional = part[part.length - 1] === '?';
-      const key = hasTrailingOptional ? part.slice(0, -1) : part;
-
-      if (hasTrailingOptional) {
-        pendingOptional = true;
-        current = current?.[key];
-      } else {
-        current = current?.[key];
-        pendingOptional = false;
-      }
-    }
-
-    return current;
-  }
-
-  private static readonly FAST_PATH_MISS = Symbol('FAST_PATH_MISS');
+  private fastPathCache = new Map<string, readonly string[] | null>();
 
   /**
    * Slow-path: full evaluation with Proxy (for complex expressions).
    * Security validation happens here, before compilation.
    */
   private evaluateWithProxy(expression: string, context: Record<string, any>): any {
-    if (this.securityEnabled) {
-      this.validateExpression(expression);
-    }
-
     let func = this.expressionCache.get(expression);
     if (!func) {
+      if (this.securityEnabled) this.validateExpression(expression);
       func = this.compile(expression, false);
       this.expressionCache.set(expression, func);
     }
@@ -284,12 +206,9 @@ export class ExpressionEvaluator {
       return;
     }
 
-    if (this.securityEnabled) {
-      this.validateExpression(statement);
-    }
-
     let func = this.statementCache.get(statement);
     if (!func) {
+      if (this.securityEnabled) this.validateExpression(statement);
       func = this.compile(statement, true);
       this.statementCache.set(statement, func);
     }
@@ -398,8 +317,22 @@ export class ExpressionEvaluator {
    * Validate expression for security
    */
   private validateExpression(expression: string): void {
+    // Fold adjacent simple string literals for validation only, so a computed
+    // constructor name cannot bypass the guard merely by splitting the string.
+    let normalized = expression;
+    let previous: string;
+    do {
+      previous = normalized;
+      normalized = normalized.replace(
+        /(["'])([^"'\\]*)\1\s*\+\s*(["'])([^"'\\]*)\3/g,
+        (_match, _leftQuote: string, left: string, _rightQuote: string, right: string) => JSON.stringify(left + right)
+      );
+    } while (normalized !== previous);
+    if (/\[\s*(["'])(?:constructor|__proto__|prototype)\1\s*\]/.test(normalized)) {
+      throw new Error("Expression contains dangerous pattern: computed prototype access");
+    }
     for (const pattern of ExpressionEvaluator.DANGEROUS_PATTERNS) {
-      if (pattern.test(expression)) {
+      if (pattern.test(normalized)) {
         throw new Error(
           `Expression contains dangerous pattern: ${pattern.source}\n` +
           `Expression: ${expression}`
@@ -435,6 +368,7 @@ export class ExpressionEvaluator {
   clearCache(): void {
     this.expressionCache.clear();
     this.statementCache.clear();
+    this.fastPathCache.clear();
   }
 
   /**

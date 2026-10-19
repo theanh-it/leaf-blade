@@ -2,7 +2,7 @@
 
 Blade template engine for Leaf framework — Laravel Blade-like syntax for JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -38,11 +38,9 @@ const app = new Elysia()
 ### 2. Use in Routes
 
 ```typescript
-import { Elysia } from "elysia";
 import { bladeView } from "leaf-blade";
-import type { BladeContext } from "leaf-blade";
 
-const app = new Elysia().get("/", async (ctx: BladeContext) => {
+app.get("/", async (ctx) => {
   return bladeView(ctx, "home", {
     title: "Home Page",
     description: "Welcome to Leaf",
@@ -57,9 +55,7 @@ const app = new Elysia().get("/", async (ctx: BladeContext) => {
 ### 3. Direct Usage
 
 ```typescript
-import type { BladeContext } from "leaf-blade";
-
-app.get("/page", async (ctx: BladeContext) => {
+app.get("/page", async (ctx) => {
   const html = await ctx.blade.render("template", {
     title: "Page Title",
     data: { ... }
@@ -103,13 +99,122 @@ This is the fastest path — the compiled ops array bypasses AST traversal entir
 ### BladeOptions
 
 ```typescript
-interface BladeOptions {
+interface BladeOptions<TContext extends Context = Context> {
   viewsDir?: string; // Directory containing templates (default: "views/blade")
   cache?: boolean; // Enable/disable cache (default: true)
+  maxCacheSize?: number; // Maximum entries per template cache (default: 500)
   cacheDir?: string; // Deprecated compatibility option; no disk cache is created
   minify?: boolean; // Defaults to true only when NODE_ENV="production"
+  security?: boolean; // Default: true
+  shared?: BladeSharedData;
+  resolveData?: BladeDataProvider<TContext>;
 }
 ```
+
+## Shared SSR data and providers
+
+Register static data once on the plugin. Routes can keep calling the existing helper:
+
+```typescript
+app.use(bladePlugin({
+  viewsDir: "./views/blade",
+  cache: true,
+  shared: { siteName: "My website", lang: "vi" },
+}));
+
+app.get("/", (ctx) => bladeView(ctx, "home", { title: "Home" }));
+```
+
+For dynamic header/footer data in a long-running Bun + Leaf/Elysia application, call an application service from the provider:
+
+```typescript
+import { Elysia } from "elysia";
+import { bladePlugin, bladeView } from "leaf-blade";
+import { getSiteLayout } from "./services/site-layout";
+
+const app = new Elysia()
+  .onError(({ error, set }) => {
+    console.error(error);
+    set.status = 503;
+    return "Page temporarily unavailable";
+  })
+  .use(bladePlugin({
+    viewsDir: "./views/blade",
+    cache: true, // Template/AST cache only
+    shared: { siteName: "My website", lang: "vi" },
+    resolveData: async (ctx, template) => ({
+      siteLayout: await getSiteLayout(),
+      currentPath: new URL(ctx.request.url).pathname,
+      currentTemplate: template,
+    }),
+  }))
+  .get("/", (ctx) => bladeView(ctx, "home", { title: "Home" }))
+  .get("/about", (ctx) => bladeView(ctx, "about", { title: "About" }))
+  .get("/fragment", (ctx) => ctx.blade.render("partials.header"))
+  .get("/api/health", () => ({ ok: true }))
+  .listen(3000);
+```
+
+The service, database access, cache lifetime, and invalidation belong to your application. For example, this service keeps public header/footer data for 60 seconds (replace the repository with your own):
+
+```typescript
+// Application file: services/site-layout.ts (not part of leaf-blade)
+import { layoutRepository } from "../repositories/layout";
+
+type SiteLayout = {
+  header: { label: string };
+  footer: { text: string };
+};
+let cached: { value: SiteLayout; expiresAt: number } | undefined;
+
+export async function getSiteLayout(): Promise<SiteLayout> {
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const value: SiteLayout = await layoutRepository.loadHeaderAndFooter();
+  cached = { value, expiresAt: Date.now() + 60_000 };
+  return value;
+}
+```
+
+Cache only public layout data in this example; keep user-specific data scoped to the request. Treat cached values as immutable. The package adds no database or business cache and never caches provider results.
+
+```blade
+{{-- layouts/app.blade.html --}}
+<html lang="{{ lang }}">
+  <head><title>{{ title }} | {{ siteName }}</title></head>
+  <body>
+    @include('partials.header')
+    @yield('content')
+    <footer>{{ siteLayout.footer.text }}</footer>
+  </body>
+</html>
+
+{{-- partials/header.blade.html --}}
+<header>{{ siteName }} — {{ siteLayout.header.label }}</header>
+```
+
+### Precedence and reserved keys
+
+Both `bladeView(ctx, template, data)` and `ctx.blade.render(template, data)` use one pipeline, from lowest to highest priority:
+
+1. Defaults: `title: "Leaf App"`, `description: "Ứng dụng Leaf với SSR và Vue 3"`, `lang: "vi"`.
+2. `shared`.
+3. The object returned by `resolveData(ctx, template)`.
+4. Data passed to the render call.
+
+Merging is shallow and uses own enumerable string keys. At every layer, `undefined` is ignored and preserves the lower-priority value. Explicit `null`, `false`, `0`, and `""` are retained; nested objects replace earlier objects as a whole.
+
+`vite`, `js`, and `css` are **reserved keys**, assigned after merging from the current Elysia context: `vite = ctx.vite || { main: "", css: "" }`, `js = vite.main`, `css = vite.css`. Data layers cannot override them. `BladeViteAssets` supports `main: string`, `css: string | readonly string[]`, and optional `imports: readonly string[]`; imports remain accessible as `vite.imports`. Direct context renders now receive the same metadata defaults and context assets as the helper.
+
+### Lifecycle, isolation, and types
+
+- Providers may return an object synchronously or a `Promise` of an object. They run once per application render call, including when the template is cached. API/static requests that do not render never invoke them.
+- Layouts, `@extends`, and `@include` inherit the data from that render and do not run the provider again. An include may still override its local data. Two independent renders in one request invoke the provider separately.
+- Provider errors propagate unchanged; register the application's Elysia `onError` handler before its routes. No partial render is used as a fallback by the plugin.
+- Each plugin instance prepares a shallow static snapshot once and reuses one renderer with its existing template/AST caches. Each render gets a fresh top-level data object. The plugin does not mutate caller objects, keep request contexts/results in a singleton, or add a global data registry.
+- Nested `shared` objects are passed by reference: **templates and providers must never mutate them**. There is no per-request deep clone, deep merge, or recursive freeze. The same reference rule applies to nested objects passed by the caller/provider; avoid mutating those values too.
+- Exported types: `BladeSharedData`, `BladeDataProvider<TContext>`, `BladeOptions<TContext>`, `BladeViteAssets`, `BladeViewData`, and the existing context types. Provider context defaults to Elysia's `Context`. For extensions, use e.g. `bladePlugin<Context & { user: { id: string } }>(...)` (import `Context` from `elysia`); your application must install those extensions before rendering. The generic describes that contract; it cannot verify the order of other plugins.
+
+This feature only injects data into **Blade SSR**. It does not automatically synchronize anything with Vue or Pinia. Any client-side serialization and hydration must be implemented explicitly by the application. Direct `BladeRenderer` / `CompiledBlade` instances remain independent and do not run plugin providers.
 
 ## ✨ Features
 
@@ -123,24 +228,21 @@ interface BladeOptions {
 - ✅ **Comments**: `{{-- --}}`
 - ✅ **JavaScript blocks**: `@js` ... `@endjs` (execute JavaScript code)
 
-### Architecture (v1.1.0)
+### Current rendering architecture
 
-v1.0.0 uses a fully native AST pipeline. v1.1.0 adds **optimized function codegen** for maximum performance:
+Both renderers share safe file loading, layout/include composition, and bounded caches:
 
 ```
-Template source
-  → BladeLexer      (tokenize)
-  → BladeParser     (build AST)
-  → TemplateComposer (resolve @extends / @section / @yield)
-  → IncludeProcessor (inline @include with correct scope)
-  → FunctionCodegen  (generate optimized JavaScript function, v1.1.0+)
-  → CompiledBlade    (execute generated function, v1.1.0+)
+Template → lexer/parser → compose layout → expand includes
+         → BladeRenderer: cached ops → CompiledRuntime
+         → CompiledBlade: generated control flow → shared evaluator/escaping
 ```
 
-No intermediate code generation. The AST is compiled directly into
-optimized JavaScript functions for maximum performance.
+The plugin continues to use `BladeRenderer`. `CompiledBlade` supports layouts, includes, `@js`, scopes, loop limits, and propagated errors rather than embedding errors into HTML. Expressions are passed as data to the evaluator, not interpolated into the generated control flow.
 
 ### Performance (v1.1.0)
+
+The historical numbers below describe v1.1.0 before runtime parity changes; they do not represent the current plugin. See [benchmark/README.md](benchmark/README.md) for current benchmark commands.
 
 - ✅ **Function codegen**: AST → optimized JavaScript function
 - ✅ **Zero-overhead caching**: Template string as cache key (no hashing)
@@ -164,8 +266,18 @@ optimized JavaScript functions for maximum performance.
 - ✅ **XSS protection**: `{{ }}` HTML-escapes output by default
 - ✅ **Path traversal prevention**: All template paths confined to `viewsDir`
 - ✅ **Symlink protection**: Symlinks resolving outside `viewsDir` are rejected
-- ✅ **Expression sandboxing**: `ExpressionEvaluator` uses `Proxy` + `with` scope; blocks dangerous identifiers
+- ✅ **Expression guards**: `ExpressionEvaluator` checks known dangerous access patterns; templates must be developer-owned JavaScript, not untrusted user templates
 - ✅ **Loop / recursion limits**: Prevents runaway templates from exhausting memory
+
+### Caching and execution limits
+
+- `maxCacheSize` bounds entries in **each** path, source, AST, file-render, and string-render cache (FIFO, default `500`, positive integer). It is not a byte limit or a provider-data cache. Available on the plugin and both renderers.
+- Caches do not stat files on every render. Entries remain until eviction or renderer `clearCache()`; use `cache: false` during development. `renderSync()` can report an uncompiled template after eviction.
+- File and string caches are separate. Concurrent cold renders of the same file share compilation work, never data or HTML.
+- `CompiledBlade` preserves its default `.blade.php` suffix and accepts explicit `.blade.html` filenames. `renderString()` / `compile()` accept standalone source; file directives such as `@extends` / `@include` throw an error directing you to `render()`.
+- `CompiledBlade` accepts `maxIterations` (default `10000`) and `maxDepth` (default `100`); `BladeRenderer` accepts them inside `runtime`. Limits must be positive integers.
+- `security` provides defense in depth, **not a JavaScript isolation sandbox**. Directive limits do not interrupt arbitrary loops in `@js` or application helpers. Do not run user-authored templates in a long-running Bun process.
+- Minification runs on each rendered result; measure with real templates before enabling it. Request HTML is not cached.
 
 ## 📖 Detailed Guide
 
@@ -498,6 +610,21 @@ renderer.clearCache();
 ```
 
 ## 📋 Changelog
+
+### Unreleased
+
+- Share safe loading/composition across renderers; fix `CompiledBlade` traversal, symlinks, single-quote escaping, and errors embedded in HTML.
+- Bound all template caches with FIFO eviction, separate file/string caches, coalesce concurrent cold compilation, and cache resolved paths.
+- Cache parsed property paths, reduce foreach allocation, and avoid an extra await for synchronous providers.
+- Guard constant-computed constructor access; clarify developer-owned templates and the limits of `security`.
+- Add regression tests and a multi-round SSR benchmark; correct the existing cold measurement and Medium summary row.
+
+### [1.2.0] - 2026-10-19
+
+- Add static `shared` data and synchronous/asynchronous `resolveData(ctx, template)` providers for Blade SSR.
+- Unify helper/context render data precedence, metadata defaults and reserved context assets; ignore `undefined` overrides.
+- Isolate request data and include traversal state across concurrent renders and plugin instances; keep template caches unchanged.
+- Export provider/shared/options types and support Vite CSS/import arrays. Document application-owned caching and SSR-only injection.
 
 ### [1.1.0] - 2026-08-13
 

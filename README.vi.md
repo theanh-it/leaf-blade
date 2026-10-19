@@ -2,7 +2,7 @@
 
 Blade template engine cho Leaf framework — Laravel Blade-like syntax cho JavaScript/TypeScript.
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-ISC-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
 ![Bun](https://img.shields.io/badge/Bun-latest-black.svg)
@@ -38,11 +38,9 @@ const app = new Elysia()
 ### 2. Sử Dụng trong Routes
 
 ```typescript
-import { Elysia } from "elysia";
 import { bladeView } from "leaf-blade";
-import type { BladeContext } from "leaf-blade";
 
-const app = new Elysia().get("/", async (ctx: BladeContext) => {
+app.get("/", async (ctx) => {
   return bladeView(ctx, "home", {
     title: "Home Page",
     description: "Welcome to Leaf",
@@ -57,9 +55,7 @@ const app = new Elysia().get("/", async (ctx: BladeContext) => {
 ### 3. Sử Dụng Trực Tiếp
 
 ```typescript
-import type { BladeContext } from "leaf-blade";
-
-app.get("/page", async (ctx: BladeContext) => {
+app.get("/page", async (ctx) => {
   const html = await ctx.blade.render("template", {
     title: "Page Title",
     data: { ... }
@@ -103,13 +99,122 @@ const html = renderer.renderSync("template", { title: "Xin chào" });
 ### BladeOptions
 
 ```typescript
-interface BladeOptions {
+interface BladeOptions<TContext extends Context = Context> {
   viewsDir?: string; // Thư mục chứa templates (mặc định: "views/blade")
   cache?: boolean; // Bật/tắt cache (mặc định: true)
+  maxCacheSize?: number; // Số entry tối đa mỗi cache (mặc định: 500)
   cacheDir?: string; // Tùy chọn tương thích đã deprecated; không tạo disk cache
   minify?: boolean; // Mặc định chỉ bật khi NODE_ENV="production"
+  security?: boolean; // Default: true
+  shared?: BladeSharedData;
+  resolveData?: BladeDataProvider<TContext>;
 }
 ```
+
+## Dữ liệu SSR dùng chung và provider
+
+Đăng ký dữ liệu tĩnh một lần trên plugin. Route tiếp tục gọi helper như trước:
+
+```typescript
+app.use(bladePlugin({
+  viewsDir: "./views/blade",
+  cache: true,
+  shared: { siteName: "My website", lang: "vi" },
+}));
+
+app.get("/", (ctx) => bladeView(ctx, "home", { title: "Trang chủ" }));
+```
+
+Với header/footer động trong ứng dụng Bun + Leaf/Elysia chạy lâu dài, provider gọi service do ứng dụng quản lý:
+
+```typescript
+import { Elysia } from "elysia";
+import { bladePlugin, bladeView } from "leaf-blade";
+import { getSiteLayout } from "./services/site-layout";
+
+const app = new Elysia()
+  .onError(({ error, set }) => {
+    console.error(error);
+    set.status = 503;
+    return "Trang tạm thời không khả dụng";
+  })
+  .use(bladePlugin({
+    viewsDir: "./views/blade",
+    cache: true, // Chỉ cache template/AST
+    shared: { siteName: "My website", lang: "vi" },
+    resolveData: async (ctx, template) => ({
+      siteLayout: await getSiteLayout(),
+      currentPath: new URL(ctx.request.url).pathname,
+      currentTemplate: template,
+    }),
+  }))
+  .get("/", (ctx) => bladeView(ctx, "home", { title: "Trang chủ" }))
+  .get("/about", (ctx) => bladeView(ctx, "about", { title: "Giới thiệu" }))
+  .get("/fragment", (ctx) => ctx.blade.render("partials.header"))
+  .get("/api/health", () => ({ ok: true }))
+  .listen(3000);
+```
+
+Service, truy vấn database, thời hạn cache và invalidation thuộc ứng dụng. Ví dụ service sau cache dữ liệu header/footer công khai trong 60 giây (thay repository bằng implementation của bạn):
+
+```typescript
+// File của ứng dụng: services/site-layout.ts (không thuộc leaf-blade)
+import { layoutRepository } from "../repositories/layout";
+
+type SiteLayout = {
+  header: { label: string };
+  footer: { text: string };
+};
+let cached: { value: SiteLayout; expiresAt: number } | undefined;
+
+export async function getSiteLayout(): Promise<SiteLayout> {
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const value: SiteLayout = await layoutRepository.loadHeaderAndFooter();
+  cached = { value, expiresAt: Date.now() + 60_000 };
+  return value;
+}
+```
+
+Ví dụ này chỉ cache layout công khai; dữ liệu riêng của người dùng phải giới hạn trong request. Xem giá trị đã cache là bất biến. Package không thêm database hay cache nghiệp vụ và không cache kết quả provider.
+
+```blade
+{{-- layouts/app.blade.html --}}
+<html lang="{{ lang }}">
+  <head><title>{{ title }} | {{ siteName }}</title></head>
+  <body>
+    @include('partials.header')
+    @yield('content')
+    <footer>{{ siteLayout.footer.text }}</footer>
+  </body>
+</html>
+
+{{-- partials/header.blade.html --}}
+<header>{{ siteName }} — {{ siteLayout.header.label }}</header>
+```
+
+### Thứ tự ưu tiên và khóa dành riêng
+
+Cả `bladeView(ctx, template, data)` và `ctx.blade.render(template, data)` dùng cùng một pipeline, theo thứ tự từ thấp đến cao:
+
+1. Mặc định: `title: "Leaf App"`, `description: "Ứng dụng Leaf với SSR và Vue 3"`, `lang: "vi"`.
+2. `shared`.
+3. Object do `resolveData(ctx, template)` trả về.
+4. Dữ liệu truyền vào lần render.
+
+Merge nông theo các khóa chuỗi enumerable thuộc chính object. Ở mọi lớp, `undefined` được bỏ qua để giữ giá trị ở lớp thấp hơn. `null`, `false`, `0` và `""` được giữ nguyên; object lồng nhau thay thế toàn bộ object ở lớp trước.
+
+`vite`, `js`, `css` là **khóa dành riêng**, được gán sau merge từ Elysia context hiện tại: `vite = ctx.vite || { main: "", css: "" }`, `js = vite.main`, `css = vite.css`. Các lớp dữ liệu không thể ghi đè chúng. `BladeViteAssets` hỗ trợ `main: string`, `css: string | readonly string[]` và `imports: readonly string[]` tùy chọn; truy cập imports qua `vite.imports`. Render trực tiếp qua context nay nhận cùng metadata mặc định và assets từ context như helper.
+
+### Vòng đời, cô lập dữ liệu và types
+
+- Provider có thể trả về object đồng bộ hoặc `Promise` của object. Mỗi lần render ở cấp ứng dụng gọi provider một lần, kể cả khi template đã có cache. Request API/static không render sẽ không gọi provider.
+- Layout, `@extends`, `@include` kế thừa dữ liệu của lần render và không gọi lại provider. Include vẫn có thể ghi đè dữ liệu trong scope cục bộ. Hai lần render độc lập trong cùng request gọi provider riêng.
+- Lỗi provider được propagate nguyên vẹn; đăng ký Elysia `onError` của ứng dụng trước các route. Plugin không tự render dữ liệu thiếu để thay thế.
+- Mỗi instance plugin chuẩn bị snapshot nông của dữ liệu tĩnh một lần, tái sử dụng một renderer và cache template/AST hiện có. Mỗi lần render tạo object dữ liệu cấp cao nhất riêng. Plugin không mutate object của caller, giữ context/kết quả request trong singleton hay tạo registry dữ liệu toàn cục.
+- Object lồng nhau trong `shared` được truyền bằng tham chiếu: **template và provider tuyệt đối không được sửa chúng**. Không deep-clone mỗi request, deep merge hay freeze đệ quy. Object lồng nhau từ caller/provider cũng giữ nguyên tham chiếu; cần tránh sửa các giá trị đó.
+- Các type được export: `BladeSharedData`, `BladeDataProvider<TContext>`, `BladeOptions<TContext>`, `BladeViteAssets`, `BladeViewData` và các type context hiện có. Context của provider mặc định là `Context` của Elysia. Nếu cần mở rộng, dùng ví dụ `bladePlugin<Context & { user: { id: string } }>(...)` (import `Context` từ `elysia`); ứng dụng phải cài extension đó trước khi render. Generic mô tả hợp đồng này, không thể kiểm tra thứ tự các plugin khác.
+
+Tính năng này chỉ inject dữ liệu vào **Blade SSR**, không tự đồng bộ sang Vue hoặc Pinia. Ứng dụng phải chủ động triển khai serialize dữ liệu và hydrate phía client nếu cần. Các instance `BladeRenderer` / `CompiledBlade` dùng trực tiếp vẫn độc lập, không chạy provider của plugin.
 
 ## ✨ Tính Năng
 
@@ -123,24 +228,21 @@ interface BladeOptions {
 - ✅ **Comments**: `{{-- --}}`
 - ✅ **JavaScript blocks**: `@js` ... `@endjs` (chạy JavaScript code)
 
-### Kiến Trúc (v1.1.0)
+### Kiến trúc render hiện tại
 
-v1.0.0 sử dụng pipeline AST native hoàn toàn. v1.1.0 bổ sung **function codegen tối ưu** để đạt hiệu năng tối đa:
+Hai renderer dùng chung bộ tải file an toàn, xử lý layout/include và cache có giới hạn:
 
 ```
-Template source
-  → BladeLexer       (tokenize)
-  → BladeParser      (build AST)
-  → TemplateComposer (resolve @extends / @section / @yield)
-  → IncludeProcessor (inline @include với scope chính xác)
-  → FunctionCodegen  (sinh JavaScript function tối ưu, v1.1.0+)
-  → CompiledBlade    (thực thi generated function, v1.1.0+)
+Template → lexer/parser → compose layout → expand includes
+         → BladeRenderer: cached ops → CompiledRuntime
+         → CompiledBlade: generated control flow → shared evaluator/escaping
 ```
 
-Không sinh code trung gian. AST được compile trực tiếp thành
-JavaScript function tối ưu để đạt hiệu năng tối đa.
+Plugin tiếp tục dùng `BladeRenderer`. `CompiledBlade` hỗ trợ layout, include, `@js`, scope, giới hạn vòng lặp và propagate lỗi; không tự chuyển lỗi thành HTML. Biểu thức được truyền như dữ liệu vào evaluator, không chèn trực tiếp vào code điều khiển được sinh.
 
 ### Performance (v1.1.0)
+
+Số liệu lịch sử bên dưới thuộc v1.1.0, trước khi thống nhất runtime; không đại diện cho plugin hiện tại. Chạy benchmark mới theo [benchmark/README.md](benchmark/README.md).
 
 - ✅ **Function codegen**: AST → JavaScript function tối ưu
 - ✅ **Zero-overhead caching**: Dùng template string làm cache key (không hash)
@@ -164,8 +266,18 @@ JavaScript function tối ưu để đạt hiệu năng tối đa.
 - ✅ **XSS protection**: `{{ }}` HTML-escape output theo mặc định
 - ✅ **Ngăn path traversal**: Tất cả template path bị giới hạn trong `viewsDir`
 - ✅ **Bảo vệ symlink**: Symlink trỏ ra ngoài `viewsDir` bị từ chối
-- ✅ **Expression sandboxing**: `ExpressionEvaluator` dùng `Proxy` + `with` scope; chặn các identifier nguy hiểm
+- ✅ **Expression guards**: `ExpressionEvaluator` kiểm tra các mẫu truy cập nguy hiểm; template phải là JavaScript do đội phát triển kiểm soát, không nhận template tùy ý từ người dùng
 - ✅ **Loop / recursion limits**: Ngăn template vô hạn làm cạn bộ nhớ
+
+### Cache và giới hạn thực thi
+
+- `maxCacheSize` là số entry tối đa trong **mỗi** cache path, source, AST, render file và render chuỗi (FIFO, mặc định `500`, số nguyên dương). Đây không phải giới hạn byte hay cache dữ liệu provider. Áp dụng cho plugin và cả hai renderer.
+- Cache không stat file ở mỗi lần render. Entry tồn tại tới khi bị eviction hoặc gọi `clearCache()` trên renderer; dùng `cache: false` trong môi trường dev. `renderSync()` có thể báo chưa compile nếu template đã bị eviction.
+- Cache file và chuỗi độc lập. Các lần render lạnh đồng thời của cùng file chia sẻ tác vụ compile, không chia sẻ dữ liệu hay HTML.
+- `CompiledBlade` giữ đuôi mặc định `.blade.php`; cũng hỗ trợ tên file `.blade.html` tường minh. `renderString()` / `compile()` chỉ xử lý source độc lập; directive cần file như `@extends` / `@include` sẽ báo lỗi hướng dẫn dùng `render()`.
+- `CompiledBlade` nhận `maxIterations` (mặc định `10000`) và `maxDepth` (mặc định `100`); `BladeRenderer` nhận các tùy chọn này trong `runtime`. Các giới hạn là số nguyên dương.
+- `security` là lớp kiểm tra bổ sung, **không phải sandbox cách ly JavaScript không đáng tin cậy**. Giới hạn directive không ngăn được vòng lặp tùy ý trong `@js` hoặc helper của ứng dụng. Không đưa template do người dùng tùy ý viết vào process Bun chạy lâu dài.
+- Minify thực hiện trên từng kết quả render; hãy đo với template thật trước khi bật. Không có cache HTML theo request.
 
 ## 📖 Hướng Dẫn Chi Tiết
 
@@ -498,6 +610,21 @@ renderer.clearCache();
 ```
 
 ## 📋 Changelog
+
+### Unreleased
+
+- Dùng chung bộ tải file/compose an toàn giữa hai renderer; sửa traversal, symlink, escaping nháy đơn và lỗi bị nhúng vào HTML của `CompiledBlade`.
+- Giới hạn mọi cache template theo FIFO, tách cache chuỗi/file, gộp compile lạnh đồng thời và cache đường dẫn đã resolve.
+- Cache các đoạn property access đã phân tích; giảm cấp phát khi foreach và tránh await dư cho provider đồng bộ.
+- Chặn thêm truy cập constructor qua chuỗi hằng ghép; ghi rõ template do đội phát triển kiểm soát và giới hạn của `security`.
+- Thêm test hồi quy và benchmark SSR lặp nhiều vòng; sửa cách đo cold và dòng Medium trong benchmark cũ.
+
+### [1.2.0] - 2026-10-19
+
+- Thêm dữ liệu tĩnh `shared` và provider `resolveData(ctx, template)` đồng bộ/bất đồng bộ cho Blade SSR.
+- Thống nhất thứ tự dữ liệu, metadata mặc định và assets dành riêng từ context cho helper/render; bỏ qua ghi đè bằng `undefined`.
+- Cô lập dữ liệu request và trạng thái duyệt include khi render đồng thời hoặc dùng nhiều instance plugin; giữ nguyên cache template.
+- Export type provider/shared/options, hỗ trợ mảng CSS/import của Vite. Bổ sung hướng dẫn cache do ứng dụng quản lý và inject chỉ cho SSR.
 
 ### [1.1.0] - 2026-08-13
 

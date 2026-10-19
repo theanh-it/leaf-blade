@@ -11,8 +11,8 @@
  * - Mất 1 lần conversion overhead (cached after first render)
  * - Phức tạp hơn interpreter
  *
- * Approach này safe (không dùng eval/Function) - vẫn giữ expression evaluation
- * thông qua ExpressionEvaluator (sandboxed).
+ * Ops contain data/control flow. Expressions still execute through
+ * ExpressionEvaluator and must come from developer-owned templates.
  */
 
 /**

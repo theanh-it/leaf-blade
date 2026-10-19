@@ -23,12 +23,10 @@ export interface IncludeProcessorOptions {
 export class IncludeProcessor {
   private loader: TemplateLoader;
   private maxIncludeDepth: number;
-  private includeStack: Set<string>;
 
   constructor(options: IncludeProcessorOptions) {
     this.loader = options.loader;
     this.maxIncludeDepth = options.maxIncludeDepth || 10;
-    this.includeStack = new Set();
   }
 
   /**
@@ -48,13 +46,14 @@ export class IncludeProcessor {
     currentPath: string,
     depth = 0
   ): Promise<ASTNode[]> {
-    return this.walk(ast, currentPath, depth);
+    return this.walk(ast, currentPath, depth, new Set());
   }
 
   private async walk(
     ast: ASTNode[],
     currentPath: string,
-    depth: number
+    depth: number,
+    ancestors: ReadonlySet<string>
   ): Promise<ASTNode[]> {
     if (depth >= this.maxIncludeDepth) {
       throw new Error(
@@ -67,7 +66,7 @@ export class IncludeProcessor {
 
     for (const node of ast) {
       if (node.type === 'Include') {
-        const includedAst = await this.processInclude(node, depth);
+        const includedAst = await this.processInclude(node, depth, ancestors);
         result.push(...includedAst);
       } else if (node.type === 'If') {
         result.push({
@@ -75,16 +74,16 @@ export class IncludeProcessor {
           branches: await Promise.all(
             node.branches.map(async branch => ({
               ...branch,
-              body: await this.walk(branch.body, currentPath, depth),
+              body: await this.walk(branch.body, currentPath, depth, ancestors),
             }))
           ),
         });
       } else if (node.type === 'ForEach') {
-        result.push({ ...node, body: await this.walk(node.body, currentPath, depth) });
+        result.push({ ...node, body: await this.walk(node.body, currentPath, depth, ancestors) });
       } else if (node.type === 'For') {
-        result.push({ ...node, body: await this.walk(node.body, currentPath, depth) });
+        result.push({ ...node, body: await this.walk(node.body, currentPath, depth, ancestors) });
       } else if (node.type === 'While') {
-        result.push({ ...node, body: await this.walk(node.body, currentPath, depth) });
+        result.push({ ...node, body: await this.walk(node.body, currentPath, depth, ancestors) });
       } else {
         result.push(node);
       }
@@ -98,52 +97,51 @@ export class IncludeProcessor {
    */
   private async processInclude(
     node: IncludeNode,
-    depth: number
+    depth: number,
+    ancestors: ReadonlySet<string>
   ): Promise<ASTNode[]> {
     // Check circular includes
-    if (this.includeStack.has(node.partial)) {
+    if (ancestors.has(node.partial)) {
       throw new Error(
         `Circular include detected: ${node.partial}\n` +
-        `Include chain: ${Array.from(this.includeStack).join(' -> ')} -> ${node.partial}`
+        `Include chain: ${Array.from(ancestors).join(' -> ')} -> ${node.partial}`
       );
     }
 
-    this.includeStack.add(node.partial);
+    // Each include chain has its own ancestors. Concurrent renders and sibling
+    // @if branches may load the same partial without creating a cycle.
+    const nextAncestors = new Set(ancestors);
+    nextAncestors.add(node.partial);
 
-    try {
-      // Load partial template
-      let partialAst = await this.loader.load(node.partial);
+    // Load partial template
+    let partialAst = await this.loader.load(node.partial);
 
-      // Process nested includes recursively
-      partialAst = await this.walk(partialAst, node.partial, depth + 1);
+    // Process nested includes recursively
+    partialAst = await this.walk(partialAst, node.partial, depth + 1, nextAncestors);
 
-      // Nếu include có data expression, bọc trong IncludeScopeNode.
-      // KHÔNG evaluate dataExpression ở đây: expression có thể tham chiếu
-      // biến loop (@foreach(users as user) @include('x', { user }) ...)
-      // chỉ tồn tại trong scope lúc runtime evaluate, không tồn tại ở
-      // giai đoạn include-processing (chạy 1 lần trước khi vào loop).
-      if (node.dataExpression) {
-        return [
-          {
-            type: 'IncludeScope',
-            dataExpression: node.dataExpression,
-            body: partialAst,
-            start: node.start,
-            end: node.end,
-          },
-        ];
-      }
-
-      return partialAst;
-    } finally {
-      this.includeStack.delete(node.partial);
+    // Nếu include có data expression, bọc trong IncludeScopeNode.
+    // KHÔNG evaluate dataExpression ở đây: expression có thể tham chiếu
+    // biến loop (@foreach(users as user) @include('x', { user }) ...)
+    // chỉ tồn tại trong scope lúc runtime evaluate, không tồn tại ở
+    // giai đoạn include-processing (chạy 1 lần trước khi vào loop).
+    if (node.dataExpression) {
+      return [
+        {
+          type: 'IncludeScope',
+          dataExpression: node.dataExpression,
+          body: partialAst,
+          start: node.start,
+          end: node.end,
+        },
+      ];
     }
+
+    return partialAst;
   }
 
   /**
-   * Clear include stack (cho testing)
+   * @deprecated Kept for compatibility. Include stacks are now local to each
+   * traversal, so there is no instance state to clear.
    */
-  clearStack(): void {
-    this.includeStack.clear();
-  }
+  clearStack(): void {}
 }

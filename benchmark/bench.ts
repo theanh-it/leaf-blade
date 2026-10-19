@@ -111,10 +111,11 @@ async function run() {
     }
     const bladeMediumMs = performance.now() - start;
 
-    // First render (cold)
+    // Fresh renderer: includes file I/O, parsing and compilation.
     start = performance.now();
-    await bladeRenderer.render('simple', data);
-    await bladeRenderer.render('medium', data);
+    const coldRenderer = new BladeRenderer({ viewsDir: tempDir, cache: true });
+    await coldRenderer.render('simple', data);
+    await coldRenderer.render('medium', data);
     const bladeColdMs = performance.now() - start;
 
     console.log(`  Simple (cached):  ${bladeSimpleMs.toFixed(2).padStart(8)} ms  (${(ITERATIONS / bladeSimpleMs * 1000).toFixed(0).padStart(6)} ops/sec)`);
@@ -181,14 +182,14 @@ async function run() {
     const simpleVsEjs = ejsSimpleMs / bladeCompSimpleMs;
     const mediumVsEjs = ejsMediumMs / bladeCompMediumMs;
 
-    console.log('Template  | BladeInterpreter | BladeCompiled | EJS      | vs EJS');
+    console.log('Template  | BladeOps         | BladeCompiled | EJS      | vs EJS');
     console.log('----------|------------------|---------------|----------|-------');
     console.log(`Simple    | ${(ITERATIONS / bladeSimpleMs * 1000).toFixed(0).padStart(14)} | ${(ITERATIONS / bladeCompSimpleMs * 1000).toFixed(0).padStart(13)} | ${(ITERATIONS / ejsSimpleMs * 1000).toFixed(0).padStart(8)} | ${simpleVsEjs > 1 ? '+' : ''}${((simpleVsEjs - 1) * 100).toFixed(0)}%`);
-    console.log(`Medium    | ${(ITERATIONS / bladeSimpleMs * 1000).toFixed(0).padStart(14)} | ${(ITERATIONS / bladeCompMediumMs * 1000).toFixed(0).padStart(13)} | ${(ITERATIONS / ejsMediumMs * 1000).toFixed(0).padStart(8)} | ${mediumVsEjs > 1 ? '+' : ''}${((mediumVsEjs - 1) * 100).toFixed(0)}%`);
+    console.log(`Medium    | ${(ITERATIONS / bladeMediumMs * 1000).toFixed(0).padStart(14)} | ${(ITERATIONS / bladeCompMediumMs * 1000).toFixed(0).padStart(13)} | ${(ITERATIONS / ejsMediumMs * 1000).toFixed(0).padStart(8)} | ${mediumVsEjs > 1 ? '+' : ''}${((mediumVsEjs - 1) * 100).toFixed(0)}%`);
 
   } finally {
     await teardown(tempDir);
   }
 }
 
-run().catch(console.error);
+run().catch(error => { console.error(error); process.exitCode = 1; });

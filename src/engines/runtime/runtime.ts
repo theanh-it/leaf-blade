@@ -14,7 +14,7 @@ import { ExpressionEvaluator } from "./expression-evaluator.js";
 
 export interface RuntimeOptions {
   /**
-   * Enable security features (dangerous prop blocking, sandboxing)
+   * Enable expression guards; this is not isolation for untrusted JavaScript.
    * @default true
    */
   security?: boolean;

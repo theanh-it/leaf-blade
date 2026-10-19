@@ -48,8 +48,38 @@ export class CompiledRuntime {
 
   constructor(options: CompiledRuntimeOptions = {}) {
     this.evaluator = options.evaluator || new ExpressionEvaluator({ security: options.security });
-    this.maxIterations = options.maxIterations || 10000;
-    this.maxDepth = options.maxDepth || 100;
+    this.maxIterations = options.maxIterations ?? 10000;
+    this.maxDepth = options.maxDepth ?? 100;
+    for (const [name, value] of [["maxIterations", this.maxIterations], ["maxDepth", this.maxDepth]] as const) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new Error(`${name} must be a positive safe integer`);
+      }
+    }
+  }
+
+  get limits(): { maxDepth: number; maxIterations: number } {
+    return { maxDepth: this.maxDepth, maxIterations: this.maxIterations };
+  }
+
+  evaluate(expression: string, scope: Record<string, unknown>): unknown {
+    return this.evaluator.evaluate(expression, scope);
+  }
+
+  executeStatement(statement: string, scope: Record<string, unknown>): void {
+    this.evaluator.execute(statement, scope);
+  }
+
+  createIncludeScope(scope: Record<string, unknown>, data: unknown): Record<string, unknown> {
+    const child: Record<string, unknown> = Object.create(scope);
+    if (data && typeof data === 'object') {
+      for (const key of Object.keys(data)) {
+        Object.defineProperty(child, key, {
+          value: (data as Record<string, unknown>)[key],
+          writable: true, configurable: true, enumerable: true,
+        });
+      }
+    }
+    return child;
   }
 
   /**
@@ -114,12 +144,12 @@ export class CompiledRuntime {
     }
   }
 
-  private evalToString(expr: string, scope: Record<string, any>): string {
+  evalToString(expr: string, scope: Record<string, unknown>): string {
     const v = this.evaluator.evaluate(expr, scope);
     return this.coerceToString(v);
   }
 
-  private evalAndEscape(expr: string, scope: Record<string, any>): string {
+  evalAndEscape(expr: string, scope: Record<string, unknown>): string {
     const v = this.evaluator.evaluate(expr, scope);
     return this.escapeHtml(this.coerceToString(v));
   }
@@ -144,19 +174,19 @@ export class CompiledRuntime {
     const items = this.evaluator.evaluate(op.c, scope);
     if (!items || typeof items !== 'object') return;
 
-    const entries: Array<[any, any]> = Array.isArray(items)
-      ? items.map((value, index) => [index, value] as [any, any])
-      : Object.entries(items);
+    // Avoid allocating an extra [key, value] pair for every array item.
+    const keys = Array.isArray(items) ? undefined : Object.keys(items);
+    const length = keys ? keys.length : items.length;
 
     let iteration = 0;
-    for (let e = 0, eLen = entries.length; e < eLen; e++) {
+    for (let e = 0; e < length; e++) {
       if (iteration++ >= this.maxIterations) {
         throw new Error(`Loop exceeded maximum iterations: ${this.maxIterations}`);
       }
-      const entry = entries[e];
+      const key = keys ? keys[e] : e;
       const loopScope: Record<string, any> = Object.create(scope);
-      loopScope[op.v] = entry[1];
-      if (op.k) loopScope[op.k] = entry[0];
+      loopScope[op.v] = items[key];
+      if (op.k) loopScope[op.k] = key;
       this.executeOps(op.b, loopScope, parts);
     }
   }
@@ -198,12 +228,7 @@ export class CompiledRuntime {
     parts: string[]
   ): void {
     const data = this.evaluator.evaluate(op.d, scope);
-    const childScope: Record<string, any> = Object.create(scope);
-    if (data && typeof data === 'object') {
-      for (const key in data) {
-        childScope[key] = data[key];
-      }
-    }
+    const childScope = this.createIncludeScope(scope, data);
     this.executeOps(op.b, childScope, parts);
   }
 

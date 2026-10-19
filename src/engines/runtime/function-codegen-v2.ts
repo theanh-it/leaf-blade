@@ -1,190 +1,57 @@
-/**
- * Function Codegen V2: Ultra-optimized code generation.
- *
- * Key optimizations:
- * 1. Coalesce consecutive static text into a single append
- * 2. Use a null-safe `__append()` helper for safe concatenation
- * 3. Inline loops with cached length
- * 4. Pre-cache collection references
- * 5. Minimal with() scope
- */
+/** Generate control flow once; pass expressions as data to the shared evaluator. */
+import type { ASTNode } from "../parser/ast.js";
+import { compileNodes, type Op } from "./codegen.js";
+import type { CompiledRuntime } from "./compiled-runtime.js";
+import type { RenderFunction } from "../template-engine.js";
 
-import type { ASTNode, IfNode, ForEachNode, ForNode, WhileNode, IncludeScopeNode, TextNode } from '../parser/ast.js';
-
-let varCounter = 0;
-function resetVarCounter(): void { varCounter = 0; }
-
-/**
-* Generate render function from AST.
-*/
-export function generateRenderFunction(nodes: ASTNode[]): string {
-  resetVarCounter();
-  const parts: string[] = [];
-  generateNodes(nodes, parts);
-  return parts.join('');
-}
-
-function generateNodes(nodes: ASTNode[], parts: string[]): void {
-  // Coalesce consecutive text nodes and minimize __append calls
-  let i = 0;
-  while (i < nodes.length) {
-    const node = nodes[i];
-
-    if (node.type === 'Text') {
-      // Collect consecutive text nodes
-      const textNode = node as TextNode;
-      let textBuffer = textNode.value || '';
-      let j = i + 1;
-      while (j < nodes.length && nodes[j].type === 'Text') {
-        const next = nodes[j] as TextNode;
-        textBuffer += next.value || '';
-        j++;
+export function compileRenderFunction(nodes: ASTNode[], runtime: CompiledRuntime): RenderFunction {
+  let counter = 0;
+  const { maxDepth, maxIterations } = runtime.limits;
+  const literal = JSON.stringify;
+  const evaluate = (expr: string, scope: string) => `_eval(${literal(expr)},${scope})`;
+  function generate(ops: Op[], scope: string, depth: number): string {
+    if (ops.length === 0) return "";
+    if (depth > maxDepth) return 'throw new Error("Maximum recursion depth exceeded");';
+    const parts: string[] = [];
+    for (const op of ops) {
+      switch (op.t) {
+        case "T": parts.push(`_p.push(${literal(op.v)});`); break;
+        case "E": parts.push(`_p.push(${op.s ? "_escape" : "_raw"}(${literal(op.e)},${scope}));`); break;
+        case "JS": parts.push(`_exec(${literal(op.code)},${scope});`); break;
+        case "I": parts.push(`if(${evaluate(op.c, scope)}){${generate(op.b, scope, depth + 1)}}else{${generate(op.el ?? [], scope, depth + 1)}}`); break;
+        case "IS": {
+          const child = `_s${counter++}`;
+          parts.push(`{const ${child}=_child(${scope},${evaluate(op.d, scope)});${generate(op.b, child, depth + 1)}}`);
+          break;
+        }
+        case "FE": {
+          const id = counter++;
+          const items = `_items${id}`, keys = `_keys${id}`, index = `_i${id}`, child = `_s${id}`, key = `_k${id}`;
+          parts.push(`{const ${items}=${evaluate(op.c, scope)};if(${items}&&typeof ${items}==="object"){const ${keys}=Array.isArray(${items})?null:Object.keys(${items});const _n${id}=${keys}?${keys}.length:${items}.length;for(let ${index}=0;${index}<_n${id};${index}++){if(${index}>=${maxIterations})throw new Error("Loop exceeded maximum iterations: ${maxIterations}");const ${key}=${keys}?${keys}[${index}]:${index};const ${child}=Object.create(${scope});${child}[${literal(op.v)}]=${items}[${key}];${op.k ? `${child}[${literal(op.k)}]=${key};` : ""}${generate(op.b, child, depth + 1)}}}}`);
+          break;
+        }
+        case "FR": {
+          const id = counter++, child = `_s${counter++}`;
+          parts.push(`{const ${child}=Object.create(${scope});_exec(${literal(op.i)},${child});let _n${id}=0;while(${evaluate(op.c, child)}){if(_n${id}++>=${maxIterations})throw new Error("Loop exceeded maximum iterations: ${maxIterations}");${generate(op.b, child, depth + 1)}_exec(${literal(op.u)},${child});}}`);
+          break;
+        }
+        case "W": {
+          const id = counter++;
+          parts.push(`{let _n${id}=0;while(${evaluate(op.c, scope)}){if(_n${id}++>=${maxIterations})throw new Error("Loop exceeded maximum iterations: ${maxIterations}");${generate(op.b, scope, depth + 1)}}}`);
+          break;
+        }
       }
-      if (textBuffer) {
-        const escaped = textBuffer
-          .replace(/\\/g, '\\\\')
-          .replace(/'/g, "\\'")
-          .replace(/\n/g, '\\n')
-          .replace(/\r/g, '\\r');
-        parts.push(`__append('${escaped}');`);
-      }
-      i = j;
-    } else {
-      generateNode(node, parts);
-      i++;
     }
+    return parts.join("");
   }
-}
-
-function generateNode(node: ASTNode, parts: string[]): void {
-  switch (node.type) {
-    case 'Text':
-      if (node.value) parts.push(generateText(node.value));
-      return;
-
-    case 'EscapedExpression':
-      parts.push(`__append(_e(${node.expression}));`);
-      return;
-
-    case 'RawExpression':
-      parts.push(`__append(${node.expression});`);
-      return;
-
-    case 'If':
-      generateIf(node as IfNode, parts);
-      return;
-
-    case 'ForEach':
-      generateForeach(node as ForEachNode, parts);
-      return;
-
-    case 'For':
-      generateFor(node as ForNode, parts);
-      return;
-
-    case 'While':
-      generateWhile(node as WhileNode, parts);
-      return;
-
-    case 'IncludeScope':
-      generateIncludeScope(node as IncludeScopeNode, parts);
-      return;
-
-    default:
-      return;
-  }
-}
-
-function generateText(value: string): string {
-  const escaped = value
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
-  return `__append('${escaped}');`;
-}
-
-function generateIf(node: IfNode, parts: string[]): void {
-  const branches = node.branches;
-  if (branches.length === 0) return;
-
-  let code = '';
-  for (let i = branches.length - 1; i >= 0; i--) {
-    const branch = branches[i];
-    const bodyParts: string[] = [];
-    generateNodes(branch.body, bodyParts);
-    const bodyCode = bodyParts.join('');
-
-    if (branch.kind === 'else') {
-      code = bodyCode;
-    } else {
-      code = `if(${branch.condition}){${bodyCode}}else{${code || ''}}`;
-    }
-  }
-
-  parts.push(code);
-}
-
-function generateForeach(node: ForEachNode, parts: string[]): void {
-  const valueVar = node.value;
-  const keyVar = node.key || '_k';
-  const bodyParts: string[] = [];
-  generateNodes(node.body, bodyParts);
-  const bodyCode = bodyParts.join('');
-
-  // Simple for-of: V8 optimizes this well
-  // Only use indexed loop if the key is explicitly needed
-  if (node.key) {
-    // User needs index, use indexed loop
-    const collectionVar = `_c${varCounter++}`;
-    const indexVar = `_i${varCounter++}`;
-    const lengthVar = `_l${varCounter++}`;
-    parts.push(`var ${collectionVar}=${node.collection};if(${collectionVar}){if(Array.isArray(${collectionVar})){for(var ${indexVar}=0,${lengthVar}=${collectionVar}.length;${indexVar}<${lengthVar};${indexVar}++){var ${valueVar}=${collectionVar}[${indexVar}];var ${keyVar}=${indexVar};${bodyCode}}}else{for(var ${keyVar} in ${collectionVar}){if(${collectionVar}.hasOwnProperty(${keyVar})){var ${valueVar}=${collectionVar}[${keyVar}];${bodyCode}}}}}`);
-  } else {
-    // Simple for-of (much faster)
-    parts.push(`for(const ${valueVar} of ${node.collection}){${bodyCode}}`);
-  }
-}
-
-function generateFor(node: ForNode, parts: string[]): void {
-  const bodyParts: string[] = [];
-  generateNodes(node.body, bodyParts);
-  const bodyCode = bodyParts.join('');
-
-  parts.push(`for(${node.init};${node.condition};${node.update}){${bodyCode}}`);
-}
-
-function generateWhile(node: WhileNode, parts: string[]): void {
-  const bodyParts: string[] = [];
-  generateNodes(node.body, bodyParts);
-  const bodyCode = bodyParts.join('');
-
-  parts.push(`while(${node.condition}){${bodyCode}}`);
-}
-
-function generateIncludeScope(node: IncludeScopeNode, parts: string[]): void {
-  const bodyParts: string[] = [];
-  generateNodes(node.body, bodyParts);
-  const bodyCode = bodyParts.join('');
-
-  parts.push(`(function(_c){var _oc=_s;_s=Object.create(_s);Object.assign(_s,_c||{});${bodyCode}_s=_oc;})(${node.dataExpression});`);
-}
-
-/**
- * Wrapper that emits the `__append()` helper for safe null/undefined
- * concatenation in the generated render function.
- */
-export function wrapRenderFunction(code: string): string {
-  return `(function(_s){
-  _s=_s||{};
-  var __output='';
-  function __append(s){if(s!==undefined&&s!==null)__output+=s;}
-  function _e(v){if(v==null)return'';if(typeof v!=='string')v=String(v);return v.replace(/[&<>"]/g,function(c){switch(c){case'&':return'&amp;';case'<':return'&lt;';case'>':return'&gt;';case'"':return'&quot;';default:return c;}});}
-  try{
-    with(_s){${code}}
-  }catch(e){
-    __append('[Error: '+e.message+']');
-  }
-  return __output;
-})`;
+  // Expressions and variable names are data, never code in this layer.
+  const code = `return function(_s){const _p=[];${generate(compileNodes(nodes), "_s", 1)}return _p.join("");}`;
+  const create = new Function("_eval", "_exec", "_escape", "_raw", "_child", code) as (
+    evaluate: typeof runtime.evaluate,
+    execute: typeof runtime.executeStatement,
+    escaped: typeof runtime.evalAndEscape,
+    raw: typeof runtime.evalToString,
+    child: typeof runtime.createIncludeScope,
+  ) => RenderFunction;
+  return create(runtime.evaluate.bind(runtime), runtime.executeStatement.bind(runtime), runtime.evalAndEscape.bind(runtime), runtime.evalToString.bind(runtime), runtime.createIncludeScope.bind(runtime));
 }
